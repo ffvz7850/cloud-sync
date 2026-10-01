@@ -1,0 +1,15 @@
+{
+    ".url": {
+        "cloud-sync.Application": {
+            "title": "云端互传",
+            "desc": "基于 OpenList 的文件互传工具：双栏选择、目录比对、同步备份、断点续传、服务端复制",
+            "icon": "images/icon_{0}.png",
+            "type": "iframe",
+            "protocol": "",
+            "gatewayPrefix": "/app/cloud-sync",
+            "gatewaySocket": "app.sock",
+            "url": "/app/cloud-sync",
+            "allUsers": false
+        }
+    }
+}

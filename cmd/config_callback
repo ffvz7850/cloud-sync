@@ -1,0 +1,10 @@
+#!/bin/bash
+
+### 设置页保存后执行：用新配置重启服务
+
+MAIN_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -x "${MAIN_DIR}/main" ]; then
+    "${MAIN_DIR}/main" start
+fi
+
+exit 0

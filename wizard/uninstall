@@ -1,0 +1,17 @@
+[
+  {
+    "stepTitle": "卸载云端互传",
+    "items": [
+      {
+        "type": "radio",
+        "field": "data_action",
+        "label": "数据处理方式",
+        "initValue": "keep",
+        "options": [
+          {"label": "保留配置和数据（重装后可继续使用）", "value": "keep"},
+          {"label": "清除全部数据（配置、同步绑定、任务历史、凭据）", "value": "delete"}
+        ]
+      }
+    ]
+  }
+]

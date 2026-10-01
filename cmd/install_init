@@ -1,0 +1,29 @@
+#!/bin/bash
+
+### 安装文件应用前执行：做环境检查
+
+APPNAME="cloud-sync"
+LOG_FILE="${TRIM_PKGVAR:-/var/apps/${APPNAME}/var}/info.log"
+
+find_python() {
+    for p in \
+        /var/apps/python312/target/bin/python3 \
+        /var/apps/python311/target/bin/python3 \
+        /var/apps/python310/target/bin/python3 \
+        /usr/bin/python3 \
+        /usr/local/bin/python3; do
+        if [ -x "${p}" ]; then echo "${p}"; return 0; fi
+    done
+    command -v python3 2> /dev/null
+}
+
+PY=$(find_python)
+if [ -z "${PY}" ]; then
+    echo "未找到 Python 3，本应用需要 Python 3.8 及以上版本，请先安装。" > "${TRIM_TEMP_LOGFILE:-/dev/null}"
+    exit 1
+fi
+
+mkdir -p "${TRIM_PKGVAR:-/var/apps/${APPNAME}/var}" 2> /dev/null
+echo "$(date '+%Y-%m-%d %H:%M:%S') - install_init: python=${PY}" >> "${LOG_FILE}"
+
+exit 0

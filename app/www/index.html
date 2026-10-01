@@ -1,0 +1,3081 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenList 上传</title>
+<style>
+:root{
+  --fn-blue:#0f5fff; --fn-blue2:#4593ff; --fn-blue3:#2681ff;
+  --fn-bg:#f6faff; --fn-panel:#ffffff; --fn-soft:#edf5ff;
+  --fn-text:#1f2024; --fn-sub:#6b7280; --fn-line:#e3ecf7;
+  --fn-green:#18a058; --fn-red:#e54545; --fn-orange:#f0a020; --fn-grey:#9aa3ad;
+  --radius:10px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{font:14px/1.5 "PingFang SC","Microsoft YaHei",system-ui,sans-serif;background:var(--fn-bg);color:var(--fn-text);overflow:hidden;display:flex;flex-direction:row}
+button{font:inherit;cursor:pointer;border:none;border-radius:8px;transition:.15s}
+input,select{font:inherit}
+.hidden{display:none!important}
+
+/* ---- 左侧图标导航栏 ---- */
+#app{flex:1;display:flex;min-width:0;min-height:0}
+#sidebar{width:72px;background:var(--fn-panel);border-right:1px solid var(--fn-line);display:flex;flex-direction:column;align-items:center;padding:14px 0;flex:none;gap:4px}
+.sb-logo{width:40px;height:40px;border-radius:12px;background:linear-gradient(135deg,var(--fn-blue),var(--fn-blue3));display:flex;align-items:center;justify-content:center;color:#fff;margin-bottom:18px;flex:none}
+.sb-nav{display:flex;flex-direction:column;gap:4px;width:100%;padding:0 8px}
+.sb-nav button{display:flex;flex-direction:column;align-items:center;gap:4px;padding:10px 4px;border-radius:10px;background:none;color:var(--fn-sub);font-size:11px;font-weight:500;width:100%;position:relative}
+.sb-nav button:hover{background:var(--fn-soft);color:var(--fn-text)}
+.sb-nav button.active{background:var(--fn-soft);color:var(--fn-blue)}
+.sb-nav button.active::before{content:"";position:absolute;left:-8px;top:50%;transform:translateY(-50%);width:3px;height:24px;background:var(--fn-blue);border-radius:0 3px 3px 0}
+.sb-nav button svg{flex:none}
+.sb-footer{margin-top:auto;padding:0 8px;width:100%;display:flex;flex-direction:column;gap:4px}
+.sb-footer .sb-settings{display:flex;flex-direction:column;align-items:center;gap:4px;padding:10px 4px;border-radius:10px;background:none;color:var(--fn-sub);font-size:11px;font-weight:500;width:100%;position:relative}
+.sb-footer .sb-settings:hover{background:var(--fn-soft);color:var(--fn-text)}
+.sb-footer .sb-settings.active{background:var(--fn-soft);color:var(--fn-blue)}
+.sb-footer .sb-settings.active::before{content:"";position:absolute;left:-8px;top:50%;transform:translateY(-50%);width:3px;height:24px;background:var(--fn-blue);border-radius:0 3px 3px 0}
+.sb-footer .pill{width:100%;justify-content:center;font-size:10px;padding:4px 6px;flex-direction:column;gap:2px;margin-top:8px}
+.sb-footer .pill .dot{width:6px;height:6px}
+
+/* ---- 顶栏（保留样式但不再使用） ---- */
+.pill{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;background:var(--fn-soft);color:var(--fn-text)}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--fn-grey)}
+.dot.on{background:var(--fn-green)}
+.dot.off{background:var(--fn-red)}
+
+#main{flex:1;overflow:hidden;display:flex;flex-direction:column}
+.page{flex:1;overflow:hidden;display:flex;flex-direction:column;position:relative}
+
+/* ---- 双栏 ---- */
+#panes{flex:1;display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);gap:0;overflow:hidden;min-height:0;width:100%;position:relative}
+.pane{display:flex;flex-direction:column;overflow:hidden;min-width:0;background:var(--fn-panel);margin:12px;border:1px solid var(--fn-line);border-radius:var(--radius)}
+.pane-head{padding:10px 12px;border-bottom:1px solid var(--fn-line);flex:none;min-width:0}
+.pane-head .ph-title{font-weight:600;font-size:13px;margin-bottom:6px;display:flex;align-items:center;justify-content:space-between}
+/* 左栏来源切换（本地/云端），与比对条的 cbs 风格一致但更紧凑 */
+.src-switch{display:inline-flex;border:1px solid var(--fn-line);border-radius:6px;overflow:hidden;margin-right:8px;flex:none}
+.src-switch .ss{border:none;background:#fff;padding:3px 10px;font-size:12px;cursor:pointer;color:var(--fn-sub);border-right:1px solid var(--fn-line)}
+.src-switch .ss:last-child{border-right:none}
+.src-switch .ss.on{background:var(--fn-blue);color:#fff}
+.src-switch .ss:hover:not(.on){background:var(--fn-soft)}
+/* 面包屑固定单行 + 横向滚动：层级再深也不会把中栏「上传」按钮挤出可视区 */
+.crumb{display:flex;flex-wrap:nowrap;white-space:nowrap;overflow-x:auto;min-width:0;scrollbar-width:none;gap:2px;align-items:center;font-size:12px;color:var(--fn-sub);min-height:22px}
+.crumb::-webkit-scrollbar{display:none}
+.crumb a{color:var(--fn-blue);cursor:pointer;text-decoration:none;padding:1px 4px;border-radius:4px;flex:none}
+.crumb a:hover{background:var(--fn-soft)}
+.crumb .sep{color:var(--fn-grey);flex:none}
+.pane-body{flex:1;overflow-y:auto;min-height:0;min-width:0}
+#midbar{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:12px 6px;flex:none;min-width:118px}
+#btnUpload{white-space:nowrap}
+.flist-row{display:flex;align-items:center;gap:8px;padding:6px 12px;font-size:13px;cursor:default;user-select:none;border-bottom:1px solid #f4f8fd}
+.flist-row:hover{background:var(--fn-soft)}
+.flist-row.sel{background:#e2eeff}
+.flist-row .fi{flex:none;width:18px;text-align:center}
+.flist-row .fn{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.flist-row .fs{flex:none;color:var(--fn-sub);font-size:12px;width:76px;text-align:right}
+.flist-row .fm{flex:none;color:var(--fn-sub);font-size:12px;width:130px;text-align:right}
+.flist-row.dir .fn{color:var(--fn-text);font-weight:500}
+.empty{padding:34px;text-align:center;color:var(--fn-grey);font-size:13px}
+.icon-dir{color:var(--fn-blue2)}
+.icon-file{color:var(--fn-grey)}
+
+/* ---- 按钮 ---- */
+.btn{background:var(--fn-blue);color:#fff;padding:8px 16px;font-weight:500}
+.btn:hover{background:var(--fn-blue3)}
+.btn.ghost{background:var(--fn-soft);color:var(--fn-text)}
+.btn.ghost:hover{background:#dfeaf9}
+.btn.small{padding:4px 10px;font-size:12px}
+.btn.danger{background:var(--fn-red)}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn.block{width:100%}
+
+/* ---- 任务队列 ---- */
+#queuePane{margin:12px;background:var(--fn-panel);border:1px solid var(--fn-line);border-radius:var(--radius);display:flex;flex-direction:column;flex:1;min-height:0}
+#queuePane .q-head{padding:8px 12px;border-bottom:1px solid var(--fn-line);display:flex;align-items:center;gap:10px;flex:none;flex-wrap:wrap}
+#queuePane .q-head .t{font-weight:600;font-size:13px}
+.qfilter{display:flex;gap:4px}
+.qfilter .fbtn{background:var(--fn-soft);color:var(--fn-sub);padding:3px 10px;border-radius:999px;font-size:12px}
+.qfilter .fbtn:hover{background:#dfeaf9}
+.qfilter .fbtn.active{background:var(--fn-blue);color:#fff}
+#queueBody{overflow-y:auto;min-height:0}
+.qrow{display:grid;grid-template-columns:22px 1fr 130px 150px 118px;gap:10px;align-items:center;padding:7px 12px;border-bottom:1px solid #f4f8fd;font-size:12px}
+.qrow .qn{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.qrow .qn .sub{color:var(--fn-sub);font-size:11px}
+.q-pager{display:flex;align-items:center;justify-content:center;gap:12px;padding:10px 12px;border-top:1px solid var(--fn-line);background:#fafbfc}
+.q-pager .linkbtn{padding:4px 12px;font-size:12px}
+.q-pager .linkbtn:disabled{opacity:.4;cursor:not-allowed}
+.prog{height:6px;background:var(--fn-soft);border-radius:99px;overflow:hidden;margin-top:4px}
+.prog>i{display:block;height:100%;background:var(--fn-blue);border-radius:99px;transition:width .3s}
+/* OpenList 复制任务没有真实进度，用无限循环动画表示"正在跑" */
+.prog>i.indeterminate{width:40%!important;animation:olIndeterminate 1.2s ease-in-out infinite;background:var(--fn-blue)}
+@keyframes olIndeterminate{0%{margin-left:-40%}100%{margin-left:100%}}
+/* 「一键上传」的提交状态条。提交一个文件夹可能要发几十次请求（每个子目录
+   一组 ensure_dir + copy），没有它用户只能看到界面凝固，然后反复点击。 */
+.subbar{display:flex;align-items:center;gap:10px;padding:8px 16px;background:#f2f8ff;border-bottom:1px solid var(--fn-line)}
+.subbar .subtxt{font-size:12px;font-weight:600;color:var(--fn-text)}
+.subbar .submeta{font-size:11px;color:var(--fn-sub);white-space:nowrap}
+.subbar .prog{flex:1;min-width:100px;margin-top:0}
+.subbar.finished{background:#f2fbf5}
+.subbar.finished .prog>i{background:var(--fn-green)}
+.subbar.failed{background:#fff5f5}
+.subbar.failed .prog>i{background:var(--fn-red)}
+.qstat{display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle;font-weight:600;font-size:11px;padding:2px 8px;border-radius:999px}
+.st-pending{color:var(--fn-grey)} .st-uploading{color:var(--fn-blue)} .st-verifying{color:var(--fn-orange)}
+.st-done{color:var(--fn-green)} .st-failed{color:var(--fn-red)} .st-skipped{color:var(--fn-grey)} .st-cancelled{color:var(--fn-grey)}
+.qstat.st-pending{background:rgba(154,163,173,.16)}
+.qstat.st-uploading{background:rgba(15,95,255,.12)}
+.qstat.st-verifying{background:rgba(240,160,32,.16)}
+.qstat.st-done{background:rgba(24,160,88,.14)}
+.qstat.st-failed{background:rgba(229,69,69,.14)}
+.qstat.st-skipped{background:rgba(154,163,173,.16)}
+.qstat.st-cancelled{background:rgba(154,163,173,.16)}
+.qops{display:flex;gap:6px;justify-content:flex-end}
+.linkbtn{background:none;color:var(--fn-blue);padding:2px 6px;font-size:12px;border-radius:6px}
+.linkbtn:hover{background:var(--fn-soft)}
+.linkbtn:disabled{opacity:.5;cursor:not-allowed}
+.linkbtn.red{color:var(--fn-red)}
+
+/* ---- 表单 / 面板 ---- */
+.card{background:var(--fn-panel);border:1px solid var(--fn-line);border-radius:var(--radius);padding:18px;margin:14px;overflow-y:auto}
+/* 统一行栅格：label 固定宽、控件占满剩余宽度、行高一致；nowrap 保证窄窗口不错位换行 */
+.frow{display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:nowrap;min-height:38px}
+.frow label{width:120px;color:var(--fn-sub);font-size:13px;flex:none}
+.frow input[type=text],.frow input[type=password],.frow input[type=number]{flex:1 1 auto;min-width:0;padding:8px 12px;border:1px solid var(--fn-line);border-radius:8px;background:#fbfdff}
+.frow input:focus{outline:none;border-color:var(--fn-blue)}
+.frow label.chk{width:auto;flex:1 1 auto;cursor:pointer;padding:2px 0}
+.frow.actions{margin-top:6px}
+.frow.btnrow .btn{flex:1 1 0}
+.hint{color:var(--fn-sub);font-size:12px;margin-top:4px}
+.section-t{font-weight:600;margin:6px 0 12px;font-size:14px}
+.path-group{background:#f7f9fc;border:1px solid var(--fn-line);border-radius:8px;padding:10px 12px 4px}
+.path-group .path-subtitle{font-size:12px;font-weight:600;color:var(--fn-blue);margin-bottom:8px;padding-bottom:6px;border-bottom:1px dashed var(--fn-line)}
+.path-group .frow{margin-bottom:10px}
+.path-group .frow label{width:110px;font-size:12px}
+.settings-card{margin:12px;padding:24px 28px}
+.settings-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px 36px}
+.settings-grid .col{min-width:0}
+.settings-actions{grid-column:1/-1;border-top:1px solid var(--fn-line);padding-top:16px;margin-top:8px}
+@media(max-width:820px){.settings-grid{grid-template-columns:1fr}.settings-card{margin:12px;padding:18px}}
+.sect{background:var(--fn-panel);border:1px solid var(--fn-line);border-radius:var(--radius);padding:16px;margin:0 14px 14px}
+.chk{display:flex;align-items:center;gap:8px;font-size:13px}
+
+/* ---- 对比结果（旧样式保留给绑定页复用） ---- */
+.cmp-summary{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:14px}
+.stat-card{background:var(--fn-panel);border:1px solid var(--fn-line);border-radius:var(--radius);padding:12px 18px;min-width:120px}
+.stat-card .n{font-size:22px;font-weight:700}
+.stat-card .l{font-size:12px;color:var(--fn-sub)}
+.stat-card.hl .n{color:var(--fn-orange)}
+.stat-card.ok .n{color:var(--fn-green)}
+table.cmp{width:100%;border-collapse:collapse;font-size:13px}
+table.cmp th,table.cmp td{padding:7px 10px;text-align:left;border-bottom:1px solid var(--fn-line)}
+table.cmp th{background:var(--fn-soft);font-weight:600;color:var(--fn-text);position:sticky;top:0}
+table.cmp tr:hover td{background:#f7faff}
+.tag{display:inline-block;padding:1px 8px;border-radius:99px;font-size:11px;font-weight:600}
+.tag.new{background:#fff3e0;color:var(--fn-orange)} .tag.diff{background:#fdeaea;color:var(--fn-red)} .tag.cloud{background:var(--fn-soft);color:var(--fn-sub)}
+
+/* ---- 比对条（文件传输页顶部） ---- */
+#cmpBar{flex:none;background:var(--fn-panel);border-bottom:1px solid var(--fn-line);padding:10px 16px}
+.cmpbar-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+/* 来源切换（本地 / 云端）。两侧各一枚 —— 两侧都可以是云端之后，
+   "左栏=本地、右栏=云端"只是默认值，不是规则。 */
+.cb-src{display:inline-flex;flex:none;border:1px solid var(--fn-line);border-radius:999px;overflow:hidden;background:#fbfdff}
+.cb-src .cbs{border:0;background:transparent;font:inherit;font-size:12px;font-weight:600;
+  padding:4px 10px;cursor:pointer;color:var(--fn-sub);white-space:nowrap}
+.cb-src .cbs+.cbs{border-left:1px solid var(--fn-line)}
+.cb-src .cbs:not(.on):hover{background:var(--fn-soft);color:var(--fn-text)}
+.cb-src .cbs.on{color:#fff;background:var(--fn-blue)}
+.cb-src .cbs.on[data-cmp-side="cloud"]{background:#5b5bd6}
+.cb-src .cbs.on[data-cmp-side="local"]{background:var(--fn-orange)}
+.cmpbar-row input[type=text]{flex:1 1 200px;min-width:110px;padding:7px 10px;border:1px solid var(--fn-line);border-radius:8px;background:#fbfdff}
+.cmpbar-row input[type=number]{flex:none;width:78px;padding:7px 8px;border:1px solid var(--fn-line);border-radius:8px;background:#fbfdff}
+.cmpbar-row input:focus{outline:none;border-color:var(--fn-blue)}
+/* 比对失败时把出问题的那一侧输入框标出来：只说一句"加载失败"，
+   用户不知道该改哪一个框。 */
+.cmpbar-row input.bad{border-color:var(--fn-red);background:#fff6f6}
+.cmpbar-row .cb-arrow{color:var(--fn-grey);flex:none}
+.cmpbar-row .cb-depth{font-size:12px;color:var(--fn-sub);flex:none}
+#cmpHint{margin-top:6px}
+/* 两侧选了同一种来源时的引导：下面只有一个同类型的栏，它只能带动一侧的路径 */
+#cmpHint.warn{color:var(--fn-orange)}
+#cmpBar.isfilled{background:#f7fbff}
+
+/* ---- 差异结果面板 ---- */
+#diffPane{position:absolute;left:0;right:0;bottom:0;top:0;z-index:10;display:flex;flex-direction:column;background:var(--fn-bg);border-top:2px solid var(--fn-line);box-shadow:0 -12px 40px rgba(0,0,0,.15);transition:transform .5s cubic-bezier(.22,1,.36,1),box-shadow .5s ease;transform:translateY(0);will-change:transform}
+#diffPane.diff-collapsed{transform:translateY(calc(100% - 44px));box-shadow:0 -4px 16px rgba(0,0,0,.08)}
+#diffPane.diff-collapsed #cmpOut{display:none}
+#diffPane.diff-collapsed .diff-head-row .dhr-actions>*:not(#diffToggle){display:none}
+#diffHead{flex:none;padding:9px 16px;background:var(--fn-panel);border-bottom:1px solid var(--fn-line);cursor:pointer;user-select:none;position:relative}
+#diffHead::before{content:"";position:absolute;top:5px;left:50%;transform:translateX(-50%);width:40px;height:4px;background:var(--fn-line);border-radius:3px;opacity:.5;transition:opacity .2s,background .2s}
+#diffHead:hover::before{opacity:1;background:var(--fn-grey)}
+#diffPane.diff-collapsed #diffHead{border-bottom:none}
+#diffPane.diff-collapsed #diffHead::before{top:7px}
+.diff-head-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.diff-head-row .dhr-actions{margin-left:auto;display:flex;gap:6px;flex-wrap:wrap}
+.diff-stats{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+/* 统计标签同时是**筛选开关**：点一下只看这一类，再点恢复完整列表。
+   因此这里不是 span 而是 button —— 需要 hover / 选中 / 键盘可达。 */
+.dstat{display:flex;align-items:baseline;gap:6px;padding:3px 10px;border-radius:8px;background:var(--fn-soft);
+  font-size:12px;color:var(--fn-sub);border:1px solid transparent}
+.dstat:hover{background:#e2eefc;color:var(--fn-text)}
+.dstat.on{background:#eaf3ff;border-color:var(--fn-blue);color:var(--fn-blue);font-weight:600;
+  box-shadow:0 1px 3px rgba(15,95,255,.18)}
+.dstat.on::after{content:"✓";font-size:11px;margin-left:1px}
+.dstat.zero{opacity:.55}
+.dstat b{font-size:15px}
+.dstat.local b{color:var(--fn-orange)}
+.dstat.cloud b{color:#5b5bd6}
+.dstat.mismatch b{color:var(--fn-red)}
+.dstat.same b{color:var(--fn-green)}
+.diff-root{font-size:11px;color:var(--fn-grey);margin-top:6px;word-break:break-all}
+.diff-filter-note{font-size:11px;color:var(--fn-blue);margin-top:4px}
+#cmpOut{flex:1;overflow-y:auto;min-height:0}
+.dgrp-head{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:8px;padding:7px 16px;
+  background:#eef5ff;border-top:1px solid var(--fn-line);border-bottom:1px solid var(--fn-line);font-size:12px;font-weight:600}
+.dgrp-head.local{background:#fff8ee}
+.dgrp-head.cloud{background:#f2f3ff}
+.dgrp-head.mismatch{background:#fff2f2}
+.dgrp-head.same{background:#f1fbf5}
+.dgrp-head .gcount{font-weight:400;color:var(--fn-sub)}
+.dgrp-head .gsel{margin-left:auto;display:flex;gap:8px}
+.drow{display:grid;grid-template-columns:24px minmax(0,1fr) 92px 88px auto;gap:8px;align-items:center;
+  padding:6px 16px;border-bottom:1px solid #f4f8fd;font-size:12px}
+.drow:hover{background:var(--fn-soft)}
+.drow.sel{background:#eaf3ff}
+/* 已同步行是只读的：没有勾选框、没有操作，鼠标移上去不该有"可点"的暗示 */
+.drow.readonly,.drow.readonly:hover{background:transparent;cursor:default}
+.drow .dpath{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.drow .dpath .dname{font-weight:500}
+.drow .dsz{color:var(--fn-sub);text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.drow .dops{display:flex;gap:2px;justify-content:flex-end;flex-wrap:wrap}
+.drow .dops .linkbtn{font-size:12px}
+.drow .dops .linkbtn.red{color:var(--fn-red)}
+.drow .dtag{color:var(--fn-green);font-size:12px}
+.diff-empty{padding:28px;text-align:center;color:var(--fn-green);font-size:13px}
+.diff-empty.grey{color:var(--fn-grey);padding:14px}
+.diff-pager{display:flex;align-items:center;justify-content:center;gap:10px;padding:12px 16px;border-top:1px solid var(--fn-line);background:#fafbfc;position:sticky;bottom:0;z-index:3}
+.diff-pager .dp-info{font-size:12px;color:var(--fn-sub);white-space:nowrap}
+.diff-pager .dp-page{font-size:12px;color:var(--fn-text);font-weight:500;white-space:nowrap}
+.diff-pager .dp-size{font-size:12px;padding:4px 8px;border:1px solid var(--fn-line);border-radius:6px;background:#fff;cursor:pointer}
+.diff-note{padding:10px 16px;font-size:12px;color:var(--fn-sub);background:#f7fbff;border-bottom:1px solid var(--fn-line)}
+
+/* ---- 弹层 ---- */
+#overlay{position:fixed;inset:0;background:rgba(20,30,50,.45);display:flex;align-items:center;justify-content:center;z-index:100}
+#dialog{background:#fff;border-radius:12px;min-width:340px;max-width:520px;box-shadow:0 12px 40px rgba(0,0,0,.18);overflow:hidden}
+#dialog .dh{padding:16px 20px 0;font-weight:600;font-size:15px}
+#dialog .db{padding:14px 20px;font-size:14px;color:var(--fn-text);white-space:pre-wrap;word-break:break-all}
+#dialog .db input{width:100%;margin-top:10px;padding:8px 12px;border:1px solid var(--fn-line);border-radius:8px}
+#dialog .df{padding:0 20px 16px;display:flex;justify-content:flex-end;gap:10px}
+
+#toast{position:fixed;left:50%;bottom:30px;transform:translateX(-50%);background:#232a35;color:#fff;padding:9px 18px;border-radius:8px;font-size:13px;z-index:200;box-shadow:0 6px 20px rgba(0,0,0,.2)}
+.spin{display:inline-block;width:14px;height:14px;border:2px solid var(--fn-soft);border-top-color:var(--fn-blue);border-radius:50%;animation:sp .7s linear infinite;vertical-align:-2px}
+@keyframes sp{to{transform:rotate(360deg)}}
+.loading{padding:30px;text-align:center;color:var(--fn-sub)}
+
+/* ---- 目录绑定 ---- */
+#page-bindings{display:flex;flex-direction:column}
+#bindToolbar{display:flex;align-items:center;gap:10px;padding:12px 16px;flex:none;background:var(--fn-panel);border-bottom:1px solid var(--fn-line)}
+#bindList{flex:1;overflow-y:auto;padding:12px 16px}
+.bcard{background:var(--fn-panel);border:1px solid var(--fn-line);border-radius:var(--radius);margin-bottom:12px;overflow:hidden}
+.bcard-head{padding:14px 16px;display:flex;align-items:flex-start;gap:12px;flex-wrap:wrap}
+.bcard-head .bc-main{flex:1;min-width:200px}
+.bcard-head .bc-name{font-weight:600;font-size:14px;display:flex;align-items:center;gap:8px;margin-bottom:6px}
+.bcard-head .bc-path{font-size:12px;color:var(--fn-sub);display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:4px}
+.bcard-head .bc-path .arrow{color:var(--fn-blue);font-weight:600}
+.bcard-head .bc-tgt{display:inline-flex;align-items:center;gap:4px;background:var(--fn-soft);border-radius:6px;padding:2px 8px;font-size:11px;color:var(--fn-text)}
+.bcard-head .bc-tgt.off{opacity:.5}
+.bcard-head .bc-meta{font-size:11px;color:var(--fn-grey);display:flex;gap:12px;margin-top:6px}
+.bcard-head .bc-ops{display:flex;gap:4px;flex:none;align-items:center}
+.bcard-head .bc-ops .linkbtn{font-size:12px}
+.badge-scan{font-size:10px;padding:1px 7px;border-radius:999px;font-weight:600}
+.badge-scan.idle{background:var(--fn-soft);color:var(--fn-grey)}
+.badge-scan.scanning{background:rgba(15,95,255,.14);color:var(--fn-blue)}
+.badge-scan.done{background:rgba(24,160,88,.14);color:var(--fn-green)}
+.badge-scan.error{background:rgba(229,69,69,.14);color:var(--fn-red)}
+.bc-misscount{font-size:12px;font-weight:600;color:var(--fn-orange)}
+.bc-misscount.zero{color:var(--fn-green)}
+.bc-scanprog{margin-top:8px}
+.bc-progbar{height:4px;background:#e8eef5;border-radius:2px;overflow:hidden}
+.bc-progfill{height:100%;background:linear-gradient(90deg,#409eff,#67c23a);border-radius:2px;transition:width .3s}
+.bc-progtext{font-size:11px;color:var(--fn-grey);margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bcard-body{border-top:1px solid var(--fn-line);display:none;flex-direction:column}
+.bcard-body.open{display:flex}
+.bc-files-bar{padding:8px 16px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;background:#f9fcff;border-bottom:1px solid var(--fn-line)}
+.bc-files{max-height:360px;overflow-y:auto}
+.bfrow{display:grid;grid-template-columns:28px 1fr 90px auto;gap:10px;align-items:center;padding:7px 16px;border-bottom:1px solid #f4f8fd;font-size:12px}
+.bfrow:hover{background:var(--fn-soft)}
+.bfrow .bf-path{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bfrow .bf-size{color:var(--fn-sub);text-align:right}
+.bfrow .bf-tgts{display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end}
+.seg{display:inline-flex;border:1px solid var(--fn-line);border-radius:6px;overflow:hidden}
+.seg button{border:none;background:#fff;padding:3px 12px;font-size:12px;cursor:pointer;color:var(--fn-sub)}
+.seg button.active{background:var(--fn-blue);color:#fff}
+.bf-folder{display:flex;align-items:center;gap:6px;cursor:pointer}
+.bf-folder .bf-path{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500}
+.bf-arrow{flex:none;width:16px;text-align:center;color:var(--fn-sub);font-size:11px}
+.bf-badge{flex:none;min-width:18px;height:18px;line-height:18px;text-align:center;background:#ff6b35;color:#fff;border-radius:9px;font-size:11px;padding:0 5px}
+.bf-badge.done{background:#e2e8f0;color:#94a3b8}
+.bf-tgt{font-size:10px;padding:1px 6px;border-radius:5px;font-weight:500;white-space:nowrap}
+.bf-tgt.missing{background:#fff3e0;color:var(--fn-orange)}
+.bf-tgt.mismatch{background:#fdeaea;color:var(--fn-red)}
+.bf-tgt.queued,.bf-tgt.uploading{background:rgba(15,95,255,.12);color:var(--fn-blue)}
+.bf-tgt.done,.bf-tgt.uploaded{background:rgba(24,160,88,.14);color:var(--fn-green)}
+.bf-tgt.failed{background:rgba(229,69,69,.14);color:var(--fn-red)}
+
+/* 绑定表单弹层 */
+#bindDlg{background:#fff;border-radius:12px;width:600px;max-width:94vw;max-height:88vh;display:flex;flex-direction:column;box-shadow:0 12px 40px rgba(0,0,0,.2)}
+#bindDlg .bd-header{padding:16px 20px;font-weight:600;font-size:15px;border-bottom:1px solid var(--fn-line)}
+#bindDlg .bd-body{padding:16px 20px;overflow-y:auto;flex:1}
+#bindDlg .bd-footer{padding:12px 20px;border-top:1px solid var(--fn-line);display:flex;justify-content:flex-end;gap:10px}
+#bindDlg .frow{margin-bottom:12px}
+#bindDlg .frow label{width:100px}
+#bindDlg .frow label.switch{width:38px;min-width:38px}
+.tgt-editor{border:1px solid var(--fn-line);border-radius:8px;padding:10px;margin-bottom:8px;background:#fbfdff}
+.tgt-editor .te-row{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+.tgt-editor .te-row input[type=text]{flex:1;padding:6px 10px;border:1px solid var(--fn-line);border-radius:6px;min-width:0}
+.tgt-editor .te-row .linkbtn{font-size:11px}
+.frow label.switch{width:38px;min-width:38px;padding:0;cursor:pointer;flex:none}
+.switch{position:relative;display:inline-block;width:38px;height:21px;flex:none}
+.switch input{opacity:0;width:0;height:0}
+.switch .sl{position:absolute;cursor:pointer;inset:0;background:var(--fn-grey);border-radius:99px;transition:.2s}
+.switch .sl:before{content:"";position:absolute;height:15px;width:15px;left:3px;bottom:3px;background:#fff;border-radius:50%;transition:.2s}
+.switch input:checked+.sl{background:var(--fn-blue)}
+.switch input:checked+.sl:before{transform:translateX(17px)}
+
+/* 目录选择器 */
+#pickerDlg{background:#fff;border-radius:12px;width:480px;max-width:94vw;max-height:80vh;display:flex;flex-direction:column}
+#pickerDlg .pk-header{padding:14px 18px;font-weight:600;font-size:14px;border-bottom:1px solid var(--fn-line);display:flex;align-items:center;gap:8px}
+#pickerDlg .pk-body{flex:1;overflow-y:auto;min-height:200px}
+#pickerDlg .pk-footer{padding:10px 18px;border-top:1px solid var(--fn-line);display:flex;justify-content:space-between;gap:10px;align-items:center}
+.pkrow{display:flex;align-items:center;gap:8px;padding:7px 18px;cursor:pointer;font-size:13px}
+.pkrow:hover{background:var(--fn-soft)}
+.pkrow .pn{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pk-crumb{font-size:12px;color:var(--fn-sub);display:flex;gap:2px;align-items:center;flex:1;overflow-x:auto;scrollbar-width:none}
+.pk-crumb a{color:var(--fn-blue);cursor:pointer;white-space:nowrap}
+</style>
+</head>
+<body>
+<div id="app">
+  <!-- 左侧图标导航栏 -->
+  <nav id="sidebar">
+    <div class="sb-logo">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 19a4.5 4.5 0 1 0 0-9h-1.8A7 7 0 1 0 4 15.9"/></svg>
+    </div>
+    <div class="sb-nav">
+      <button data-tab="transfer" class="active" title="文件对比">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="16" y2="17"/></svg>
+        <span>文件对比</span>
+      </button>
+      <button data-tab="bindings" title="同步备份">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+        <span>同步备份</span>
+      </button>
+      <button data-tab="queue" title="传输列表">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+        <span>传输列表</span>
+      </button>
+    </div>
+    <div class="sb-footer">
+      <button data-tab="settings" title="设置" class="sb-settings">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        <span>设置</span>
+      </button>
+      <div id="connPill" class="pill"><span class="dot" id="connDot"></span><span id="connText">未连接</span></div>
+    </div>
+  </nav>
+
+  <!-- 主内容区 -->
+  <div id="main">
+  <!-- 连接面板 -->
+  <div class="page hidden" id="page-connect">
+    <div class="card" style="max-width:520px;margin:40px auto">
+      <div class="section-t">连接到 OpenList</div>
+      <div class="frow"><label>OpenList 地址</label><input type="text" id="inUrl" placeholder="http://192.168.0.10:5244"></div>
+      <div class="frow"><label>用户名</label><input type="text" id="inUser" autocomplete="username"></div>
+      <div class="frow"><label>密码</label><input type="password" id="inPass" autocomplete="current-password"></div>
+      <div class="frow"><label>两步验证</label><input type="text" id="inOtp" placeholder="如开启 2FA 才需要，可留空"></div>
+      <div class="frow"><label class="chk" style="width:auto"><input type="checkbox" id="inRemember" checked> 记住密码（下次自动填充）</label></div>
+      <div class="hint" id="connErr" style="color:var(--fn-red);margin-bottom:8px"></div>
+      <div class="frow">
+        <button class="btn" id="btnDoLogin" style="flex:1">登录并连接</button>
+        <button class="btn ghost" id="btnTest">测试连接</button>
+      </div>
+      <div class="hint">密码只用于换取访问令牌；勾选"记住密码"后密码会保存在本地浏览器，令牌失效会自动续期。</div>
+      <div id="diagBox" class="hint" style="margin-top:12px"></div>
+    </div>
+  </div>
+
+  <!-- 文件对比（目录比对已并入本页） -->
+  <div class="page" id="page-transfer">
+    <div id="cmpBar">
+      <div class="cmpbar-row">
+        <span class="cb-src" id="cmpSrcLeft">
+          <button type="button" class="cbs on" data-cmp-which="left" data-cmp-side="local">本地</button>
+          <button type="button" class="cbs" data-cmp-which="left" data-cmp-side="cloud">云端</button>
+        </span>
+        <input type="text" id="cmpLocal" placeholder="本地目录，如 /vol1/1000/相册">
+        <span class="cb-arrow">⇄</span>
+        <span class="cb-src" id="cmpSrcRight">
+          <button type="button" class="cbs" data-cmp-which="right" data-cmp-side="local">本地</button>
+          <button type="button" class="cbs on" data-cmp-which="right" data-cmp-side="cloud">云端</button>
+        </span>
+        <input type="text" id="cmpCloud" placeholder="/backup/相册">
+        <button class="btn" id="btnCompare" title="双向比对：两侧各自可以是本地或云端，自动递归到最底层">比对</button>
+      </div>
+    </div>
+    <div id="panes">
+      <div class="pane">
+        <div class="pane-head">
+          <div class="ph-title">
+            <span id="localPaneTitle">本地（NAS）</span>
+            <span><button class="linkbtn" id="localUp">上级</button><button class="linkbtn" id="localRefresh">刷新</button></span></div>
+          <div class="crumb" id="localCrumb"></div>
+        </div>
+        <div class="pane-body" id="localList"><div class="loading">加载中…</div></div>
+      </div>
+      <div id="midbar">
+        <button class="btn ghost" id="btnUpload" title="把左侧勾选的内容上传到右侧当前目录">上传 →</button>
+        <button class="btn" id="btnComparePick" title="用左右两栏各勾选的文件夹（或当前所在目录）做双向比对">比对 ⇄</button>
+        <div class="hint" id="selInfo" style="text-align:center">未选择</div>
+      </div>
+      <div class="pane">
+        <div class="pane-head">
+          <div class="ph-title"><span>云端（OpenList）</span>
+            <span><button class="linkbtn" id="cloudMkdir">新建文件夹</button><button class="linkbtn" id="cloudRefresh">刷新</button></span></div>
+          <div class="crumb" id="cloudCrumb"></div>
+        </div>
+        <div class="pane-body" id="cloudList"><div class="loading">加载中…</div></div>
+      </div>
+
+      <!-- 差异结果：弹窗覆盖目录栏，不比对时整块隐藏 -->
+      <div id="diffPane" class="hidden">
+        <div id="diffHead"></div>
+        <div id="cmpOut"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 传输列表（独立页） -->
+  <div class="page hidden" id="page-queue">
+    <div id="queuePane">
+      <div class="q-head">
+        <span class="t">传输列表</span>
+        <span class="hint" id="queueStat"></span>
+        <span class="qfilter" id="queueFilter">
+          <button class="fbtn active" data-filter="all">全部</button>
+          <button class="fbtn" data-filter="failed">失败</button>
+          <button class="fbtn" data-filter="done">已完成</button>
+          <button class="fbtn" data-filter="active">进行中</button>
+        </span>
+        <span style="margin-left:auto"></span>
+        <button class="linkbtn" id="btnPause">全部暂停</button>
+        <button class="linkbtn red" id="btnCancelAll">全部取消</button>
+        <button class="linkbtn hidden" id="btnRetryAll">全部重试</button>
+        <button class="linkbtn" id="btnClearDone">清除已结束</button>
+      </div>
+      <div id="queueBody"><div class="empty">暂无任务</div></div>
+      <div id="queuePager" class="q-pager" style="display:none">
+        <button class="linkbtn" id="btnPagePrev">上一页</button>
+        <span id="pageInfo" class="hint"></span>
+        <button class="linkbtn" id="btnPageNext">下一页</button>
+        <select id="pageSize" style="font-size:12px;padding:3px 8px;border:1px solid var(--fn-line);border-radius:4px;background:#fff">
+          <option value="50">50条/页</option>
+          <option value="100" selected>100条/页</option>
+          <option value="200">200条/页</option>
+          <option value="500">500条/页</option>
+        </select>
+      </div>
+    </div>
+  </div>
+
+  <!-- 绑定备份 -->
+  <div class="page hidden" id="page-bindings">
+    <div id="bindToolbar">
+      <button class="btn" id="btnNewBinding">+ 新建同步</button>
+      <button class="btn ghost" id="btnScanAll">全部扫描</button>
+      <span class="hint" id="bindHint"></span>
+    </div>
+    <div id="bindList"><div class="loading"><span class="spin"></span> 加载中…</div></div>
+  </div>
+
+  <!-- 设置 -->
+  <div class="page hidden" id="page-settings">
+    <div class="card settings-card">
+      <div class="settings-grid">
+        <div class="col">
+          <div class="section-t">上传</div>
+          <div class="frow"><label>同时上传数</label><input type="number" id="cfgConc" min="1" max="8"></div>
+          <div class="frow"><label>失败重试次数</label><input type="number" id="cfgRetry" min="0" max="10"></div>
+          <div class="frow"><label class="chk"><input type="checkbox" id="cfgVerify"> 上传完成后校验云端大小</label></div>
+          <div class="section-t" style="margin-top:24px">同步自动扫描</div>
+          <div class="frow"><label class="chk"><input type="checkbox" id="cfgAutoScan"> 自动定时全量扫描（关闭时需手动点扫描）</label></div>
+          <div class="frow"><label>每隔（天）</label><input type="number" id="cfgFullScanInterval" min="1" max="30" step="1"></div>
+          <div class="frow"><label>执行时间</label><input type="time" id="cfgScanScheduleTime" value="03:00"></div>
+          <div class="frow"><label>全局扫描并发</label><input type="number" id="cfgBindingScanConc" min="1" max="10" step="1"></div>
+          <div class="hint" style="margin:-6px 0 14px">同时最多几个同步备份在扫描。多个备份指向同一云盘时，调小可避免同时请求挤爆服务器；默认2个。</div>
+          <div class="hint" style="margin:-6px 0 14px">每隔指定天数，在设定时间点对所有同步做一次完整对比，找出缺失文件并自动上传（需开启自动上传）。建议选凌晨低峰时段。平时不扫描，避免频繁请求。</div>
+          <div class="frow"><label style="width:auto">手动触发</label><button class="btn ghost" id="btnManualScan">立即扫描全部同步</button></div>
+        </div>
+        <div class="col">
+          <div class="section-t">对比</div>
+          <div class="frow"><label>排除规则</label><input type="text" id="cfgExcl" placeholder="逗号分隔，支持 * 通配"></div>
+          <div class="frow"><label>扫描并发数</label><input type="number" id="cfgScanConc" min="1" max="32"></div>
+          <div class="hint" style="margin:-6px 0 14px">扫描云端时同时向 OpenList 查几个目录。调大更快，但会给 OpenList 更大压力；调小适合 OpenList 在远端或限流的场景。</div>
+          <div class="section-t" style="margin-top:24px">文件对比默认路径</div>
+          <div class="path-group">
+            <div class="path-subtitle">左侧</div>
+            <div class="frow"><label>默认路径（本地）</label><input type="text" id="cfgLocal" placeholder="/vol1/1000"></div>
+            <div class="frow"><label>默认路径（云端）</label><input type="text" id="cfgLocalCloudRoot" placeholder="/本地存储，左栏切到云端时的起点"></div>
+          </div>
+          <div class="path-group" style="margin-top:12px">
+            <div class="path-subtitle">右侧</div>
+            <div class="frow"><label>默认路径</label><input type="text" id="cfgCloud" placeholder="/"></div>
+          </div>
+          <div class="section-t" style="margin-top:24px">其他</div>
+          <div class="frow btnrow"><button class="btn ghost" id="btnViewLog">查看运行日志</button>
+          <button class="btn ghost" id="btnDisconnect">断开连接</button></div>
+        </div>
+        <div class="frow actions settings-actions"><button class="btn" id="btnSaveCfg">保存设置</button><span class="hint" id="cfgMsg"></span></div>
+        <!-- 运行日志面板 -->
+        <div id="logPanel" style="display:none;grid-column:1/-1;border:1px solid var(--fn-line);border-radius:8px;overflow:hidden">
+          <div style="display:flex;align-items:center;gap:10px;padding:8px 12px;background:#f5f7fa;border-bottom:1px solid var(--fn-line);flex-wrap:wrap">
+            <span style="font-weight:600;font-size:13px">运行日志</span>
+            <span id="logCount" style="font-size:11px;color:var(--fn-grey)">0 条</span>
+            <div style="flex:1"></div>
+            <select id="logLevel" style="font-size:12px;padding:3px 8px;border:1px solid var(--fn-line);border-radius:4px;background:#fff">
+              <option value="">全部级别</option>
+              <option value="error">仅错误</option>
+              <option value="warn">仅警告</option>
+            </select>
+            <label style="display:inline-flex;align-items:center;gap:4px;font-size:12px;cursor:pointer">
+              <input type="checkbox" id="logAutoRefresh" checked> 自动刷新
+            </label>
+            <button class="btn ghost" id="btnLogRefresh" style="padding:3px 10px;font-size:12px">刷新</button>
+            <button class="btn ghost" id="btnLogClear" style="padding:3px 10px;font-size:12px;color:var(--fn-red)">清空</button>
+            <button class="btn ghost" id="btnLogDownload" style="padding:3px 10px;font-size:12px">下载</button>
+          </div>
+          <div id="logBox" style="max-height:320px;overflow:auto;background:#0f1622;color:#c8d6e5;padding:10px;font:12px 'Consolas','Monaco',monospace;line-height:1.6"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
+<div id="overlay" class="hidden"><div id="dialog">
+  <div class="dh" id="dlgTitle"></div><div class="db" id="dlgBody"></div>
+  <div class="df"><button class="btn ghost" id="dlgCancel">取消</button><button class="btn" id="dlgOk">确定</button></div>
+</div></div>
+
+<!-- 绑定创建/编辑表单 -->
+<div id="bindOverlay" class="hidden" style="position:fixed;inset:0;background:rgba(20,30,50,.45);display:flex;align-items:center;justify-content:center;z-index:110">
+  <div id="bindDlg">
+    <div class="bd-header" id="bdTitle">新建同步</div>
+    <div class="bd-body">
+      <div class="frow"><label>同步名称</label><input type="text" id="bdName" placeholder="如：照片备份"></div>
+      <div class="frow"><label>OpenList 源目录</label><input type="text" id="bdLocal" placeholder="/本地存储/...">
+        <button class="linkbtn" id="bdPickLocal" style="flex:none">浏览</button></div>
+      <div class="frow" style="align-items:flex-start"><label style="margin-top:6px">云端目录</label>
+        <div style="flex:1;min-width:0" id="bdTargets"></div></div>
+      <div style="margin-left:100px;margin-bottom:12px"><button class="linkbtn" id="bdAddTarget">+ 添加云端目标</button></div>
+      <div class="frow"><label>扫描范围</label><span class="hint">自动递归扫描到底（不限制深度），避免遗漏文件</span></div>
+      <div class="frow"><label>自动上传</label>
+        <label class="switch"><input type="checkbox" id="bdAuto"><span class="sl"></span></label>
+        <span class="hint">扫描后自动把缺失文件上传到所有目标</span></div>
+      <div class="frow"><label>排除规则</label><input type="text" id="bdExcl" placeholder="逗号分隔，支持 * 通配"></div>
+      <div class="frow"><label>同步模式</label>
+        <select id="bdMode" style="flex:1 1 auto;min-width:0;padding:8px 12px;border:1px solid var(--fn-line);border-radius:8px;background:#fbfdff">
+          <option value="add">只新增（推荐）</option>
+        </select>
+        <span class="hint">只把源目录里云端缺失的文件复制过去，绝不删除云端或本地的任何文件</span></div>
+      <div class="frow"><label>冲突策略</label>
+        <select id="bdConflict" style="flex:1 1 auto;min-width:0;padding:8px 12px;border:1px solid var(--fn-line);border-radius:8px;background:#fbfdff">
+          <option value="skip">跳过已存在</option>
+          <option value="overwrite">覆盖</option>
+          <option value="abort">中止报错</option>
+        </select>
+        <span class="hint">交给 OpenList 服务端执行</span></div>
+      <div class="frow"><label>快照模式</label>
+        <label class="switch"><input type="checkbox" id="bdSnapshot"><span class="sl"></span></label>
+        <span class="hint">记住上次结果：源文件没变且已同步的不再重复核对，扫描更快</span></div>
+    </div>
+    <div class="bd-footer">
+      <span class="hint" id="bdError" style="color:var(--fn-red);margin-right:auto"></span>
+      <button class="btn ghost" id="bdCancelBtn">取消</button>
+      <button class="btn" id="bdSaveBtn">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 通用确认弹层（替代原生 confirm，飞牛 iframe 内原生弹窗常被拦） -->
+<div id="confirmOverlay" class="hidden" style="position:fixed;inset:0;background:rgba(20,30,50,.45);display:flex;align-items:center;justify-content:center;z-index:200">
+  <div style="background:#fff;border-radius:12px;padding:24px;min-width:320px;max-width:90vw;box-shadow:0 8px 32px rgba(0,0,0,.2)">
+    <div id="confirmMsg" style="font-size:14px;color:var(--fn-text);margin-bottom:20px;line-height:1.6"></div>
+    <div style="display:flex;justify-content:flex-end;gap:8px">
+      <button class="btn ghost" id="confirmCancel">取消</button>
+      <button class="btn" id="confirmOk">确定</button>
+    </div>
+  </div>
+</div>
+
+<!-- 目录选择器 -->
+<div id="pickerOverlay" class="hidden" style="position:fixed;inset:0;background:rgba(20,30,50,.45);display:flex;align-items:center;justify-content:center;z-index:120">
+  <div id="pickerDlg">
+    <div class="pk-header">
+      <div class="pk-crumb" id="pkCrumb"></div>
+      <button class="linkbtn" id="pkRefresh" style="flex:none">刷新</button>
+    </div>
+    <div class="pk-body" id="pkBody"></div>
+    <div class="pk-footer">
+      <span class="hint" id="pkCurrent"></span>
+      <button class="btn ghost" id="pkCancelBtn">取消</button>
+      <button class="btn" id="pkSelectBtn">选择此目录</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="hidden"></div>
+
+<script>
+"use strict";
+/* ================= 工具 ================= */
+const $=id=>document.getElementById(id);
+const APP_NAME="cloud-sync";
+function esc(s){return String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
+function fmtSize(n){n=Number(n)||0;if(n<1024)return n+" B";const u=["KB","MB","GB","TB"];let i=-1;do{n/=1024;i++;}while(n>=1024&&i<u.length-1);return n.toFixed(n>=100?0:1)+" "+u[i];}
+function fmtSpeed(n){return fmtSize(n)+"/s";}
+function fmtTime(ts){if(!ts)return "";const d=new Date(ts>1e12?ts:ts*1000);if(isNaN(d))return "";const p=x=>String(x).padStart(2,"0");return d.getFullYear()+"-"+p(d.getMonth()+1)+"-"+p(d.getDate())+" "+p(d.getHours())+":"+p(d.getMinutes());}
+function nowSec(){return Math.floor(Date.now()/1000);}
+function ls(k,v){try{if(v===undefined)return localStorage.getItem(k);localStorage.setItem(k,v);}catch(e){return null;}}
+
+/* ---- UI 状态记忆：浏览位置 / 对比参数 / 设置草稿 / 队列筛选 ----
+   一律经 ls() 读写；localStorage 被沙箱禁用时静默降级，页面照常渲染。
+   只存非敏感 UI 状态，绝不持久化密码 / OTP。 */
+const UI_KEY="dd_ui_state";
+function uiStateRead(){try{const raw=ls(UI_KEY);if(!raw)return {};const o=JSON.parse(raw);return (o&&typeof o==="object")?o:{};}catch(e){return {};}}
+let uiState=uiStateRead();
+let uiSaveTimer=null;
+function uiPersist(immediate){
+  if(uiSaveTimer){clearTimeout(uiSaveTimer);uiSaveTimer=null;}
+  const write=()=>{try{ls(UI_KEY,JSON.stringify(uiState||{}));}catch(e){}};
+  if(immediate)write();else uiSaveTimer=setTimeout(write,300);   // 防抖，避免每次按键写盘
+}
+function saveBrowse(){uiState.localPath=state.local.path||"";uiState.cloudPath=state.cloud.path||"/";uiPersist();}
+
+/* ================= base 探测 ================= */
+const BASE_GUESS="";
+function baseCandidates(){
+  const out=[];const p=location.pathname;
+  const m=p.match(/^(\/app\/[^/]+)/);if(m)out.push(m[1]);
+  out.push("/app/"+APP_NAME,"");
+  return [...new Set(out)];
+}
+async function probeBase(){
+  for(const c of baseCandidates()){
+    try{
+      const r=await fetch((c||"")+"/api/info",{cache:"no-store"});
+      if(!r.ok)continue;
+      const d=await r.json();
+      if(d&&d.app===APP_NAME)return c;
+    }catch(e){}
+  }
+  return null;
+}
+
+/* ================= API ================= */
+async function api(path,opts){
+  opts=opts||{};
+  const init={method:opts.method||"GET",headers:{}};
+  if(opts.body!==undefined){init.method=opts.method||"POST";init.headers["Content-Type"]="application/json";init.body=JSON.stringify(opts.body);}
+  const r=await fetch(state.base+path,init);
+  let d;try{d=await r.json();}catch(e){throw new Error("响应不是 JSON（HTTP "+r.status+"）");}
+  if(!d.ok)throw new Error(d.error||("HTTP "+r.status));
+  return d;
+}
+
+/* ================= 弹层 ================= */
+let dlgResolve=null;
+function showDlg(title,body,opts){
+  opts=opts||{};
+  $("dlgTitle").textContent=title;
+  const b=$("dlgBody");b.innerHTML="";
+  if(opts.input){b.appendChild(document.createTextNode(body));
+    const inp=document.createElement("input");inp.type="text";inp.value=opts.input.value||"";inp.placeholder=opts.input.placeholder||"";b.appendChild(inp);b._input=inp;}
+  else b.textContent=body;
+  $("dlgCancel").style.display=opts.confirm?"":"none";
+  $("dlgOk").textContent=opts.okText||"确定";
+  $("overlay").classList.remove("hidden");
+  if(b._input)setTimeout(()=>b._input.focus(),50);
+  return new Promise(res=>{dlgResolve={res,input:!!opts.input};});
+}
+function closeDlg(val){$("overlay").classList.add("hidden");if(dlgResolve){dlgResolve.res(val);dlgResolve=null;}}
+$("dlgOk").onclick=()=>{if(dlgResolve&&dlgResolve.input)closeDlg($("dlgBody")._input.value);else closeDlg(true);};
+$("dlgCancel").onclick=()=>closeDlg(dlgResolve&&dlgResolve.input?null:false);
+const askConfirm=(t,b,ok)=>showDlg(t,b,{confirm:true,okText:ok});
+const askInput=(t,b,v,ph)=>showDlg(t,b,{input:{value:v,placeholder:ph}});
+const askAlert=(t,b)=>showDlg(t,b,{});
+let toastTimer=null;
+function toast(msg){const t=$("toast");t.textContent=msg;t.classList.remove("hidden");clearTimeout(toastTimer);toastTimer=setTimeout(()=>t.classList.add("hidden"),2600);}
+
+/* 自绘确认弹层（替代原生 confirm，飞牛 iframe 内原生弹窗常被拦） */
+function showConfirm(msg){
+  return new Promise(resolve=>{
+    $("confirmMsg").textContent=msg;
+    $("confirmOverlay").classList.remove("hidden");
+    const ok=()=>{cleanup();resolve(true);};
+    const cancel=()=>{cleanup();resolve(false);};
+    function cleanup(){
+      $("confirmOk").onclick=null;$("confirmCancel").onclick=null;
+      $("confirmOverlay").classList.add("hidden");
+    }
+    $("confirmOk").onclick=ok;
+    $("confirmCancel").onclick=cancel;
+  });
+}
+
+/* ================= 状态 ================= */
+const state={base:"",connected:false,config:{},
+  local:{path:"",entries:[],sel:new Set()},
+  cloud:{path:"/",entries:[],sel:new Set()},
+  tasks:[],tab:"transfer"};
+
+/* ================= 连接 ================= */
+function renderConn(){
+  const c=state.connection||{};
+  const dot=$("connDot"),text=$("connText");
+  if(c.online){dot.classList.add("on");dot.classList.remove("off");text.textContent="已连接";
+    $("page-connect").classList.add("hidden");switchTab(state.tab||"transfer");}
+  else if(c.configured){dot.classList.add("off");dot.classList.remove("on");text.textContent="离线";}
+  else{dot.classList.remove("on","off");text.textContent="未连接";}
+}
+async function refreshConnection(){
+  try{const d=await api("/api/connection");state.connection=d.connection;renderConn();
+    if(!d.connection.online&&!d.connection.configured){showConnect();}
+  }catch(e){}
+}
+function showConnect(){
+  ["transfer","queue","settings","bindings"].forEach(x=>$("page-"+x).classList.add("hidden"));
+  $("page-connect").classList.remove("hidden");
+  const c=state.connection||{};
+  $("inUrl").value=c.baseUrl||ls("ol_url")||"http://192.168.0.10:5244";
+  $("inUser").value=c.username||ls("ol_user")||"";
+  // 读取保存的密码（base64 简单编码，避免明文直接可见）
+  const savedPass=ls("ol_pass");
+  if(savedPass){try{$("inPass").value=atob(savedPass);$("inRemember").checked=true;}catch(e){}}
+}
+$("btnDoLogin").onclick=async()=>{
+  $("connErr").textContent="";$("btnDoLogin").disabled=true;
+  try{
+    const d=await api("/api/connect",{body:{baseUrl:$("inUrl").value.trim(),username:$("inUser").value.trim(),password:$("inPass").value,otpCode:$("inOtp").value.trim()}});
+    ls("ol_url",$("inUrl").value.trim());ls("ol_user",$("inUser").value.trim());
+    // 记住密码：勾选则保存（base64 简单编码），未勾选则清除
+    if($("inRemember").checked){ls("ol_pass",btoa($("inPass").value));}else{ls("ol_pass","");}
+    state.connection=d.connection;renderConn();$("inPass").value="";toast("已连接");
+    bootstrap();
+  }catch(e){$("connErr").textContent=e.message;}
+  $("btnDoLogin").disabled=false;
+};
+$("btnTest").onclick=async()=>{
+  $("diagBox").innerHTML='<span class="spin"></span> 检测中…';
+  try{const d=await api("/api/connect/test",{body:{}});
+    $("diagBox").innerHTML=d.diagnose.steps.map(s=>`<div>${s.ok?"✅":"❌"} ${esc(s.name)}：${esc(s.detail)}</div>`).join("");
+  }catch(e){$("diagBox").textContent="检测失败："+e.message;}
+};
+$("btnDisconnect").onclick=async()=>{await api("/api/disconnect",{body:{}});state.connection={};renderConn();showConnect();toast("已断开");};
+
+/* ================= 标签页 ================= */
+const TABS=["transfer","queue","settings","bindings"];
+function switchTab(t){
+  // v2.9.0：目录比对页并进了文件传输页。老用户 localStorage 里存的还是
+  // "compare"，直接兜到 transfer，否则会切到一个不存在的页面（全屏空白）。
+  if(TABS.indexOf(t)<0)t="transfer";
+  state.tab=t;
+  uiState.tab=t;uiPersist();
+  document.querySelectorAll("#sidebar button[data-tab]").forEach(b=>b.classList.toggle("active",b.dataset.tab===t));
+  TABS.forEach(x=>$("page-"+x).classList.toggle("hidden",x!==t));
+  $("page-connect").classList.add("hidden");
+  if(t==="transfer"||t==="queue"){loadTasks();}
+  if(t==="bindings"){loadBindings();}
+}
+document.querySelectorAll("#sidebar button[data-tab]").forEach(b=>b.onclick=()=>switchTab(b.dataset.tab));
+
+/* ================= 本地树 ================= */
+function crumbHtml(cur,root,rootLabel){cur=cur||"";const parts=cur.split("/").filter(Boolean);
+  // 第一个链接（根目录）点击回到聚合视图（全部存储空间），data-p 设为空
+  let html=`<a data-p="" data-root-link="1">${rootLabel||"根目录"}</a>`;let acc=root||"";
+  parts.forEach((p,i)=>{acc+=(acc?"/":"")+p;html+=`<span class="sep">/</span><a data-p="${esc(acc)}">${esc(p)}</a>`;});return html;}
+async function loadLocal(path,fallback){
+  const target=path||"";
+  state.local.path=target;$("localList").innerHTML='<div class="loading"><span class="spin"></span> 加载中…</div>';
+  const mode=(state.config&&state.config.localSourceMode)||"fs";
+  try{
+    let d;
+    if(mode==="cloud"){
+      d=await api("/api/cloud/list?path="+encodeURIComponent(target||"/"));
+      (d.entries||[]).forEach(e=>{if(e.mtime===undefined)e.mtime=0;});
+    }else{
+      const agg=!target;
+      d=await api("/api/local/list?"+(agg?"aggregate=1":"path="+encodeURIComponent(target)));
+    }
+    state.local.entries=d.entries||[];state.local.sel.clear();
+    if(mode==="cloud"){
+      state.local.root="";
+      $("localCrumb").innerHTML=crumbHtml(target||"/","");
+      $("localPaneTitle").textContent="OpenList 源";
+    }else{
+      const agg=!target;
+      if(agg){
+        state.local.root="";
+        $("localCrumb").innerHTML="全部存储空间";
+      }else{
+        // 去掉本地根路径前缀（如 /vol3/1000），只显示相对于根目录的路径
+        const root=d.root||(state.config&&state.config.localRoot)||"";
+        state.local.root=root;
+        let relPath=d.path||"";
+        if(root&&relPath===root){relPath="";}
+        else if(root&&relPath.startsWith(root+"/")){relPath=relPath.slice(root.length+1);}
+        else if(root&&relPath.startsWith(root)){relPath=relPath.slice(root.length).replace(/^\/+/,"");}
+        $("localCrumb").innerHTML=crumbHtml(relPath,root,"根目录");
+      }
+      $("localPaneTitle").textContent="本地（NAS）";
+    }
+    $("localCrumb").querySelectorAll("a").forEach(a=>a.onclick=()=>loadLocal(a.dataset.p));
+    renderLocal();saveBrowse();autoFillCompareBar();
+    return true;
+  }catch(e){
+    if(fallback!==undefined&&target!==fallback)return loadLocal(fallback,fallback);
+    state.local.entries=[];
+    $("localList").innerHTML=`<div class="empty">${esc(e.message)}</div>`;
+    return false;
+  }
+}
+const BROWSER_PAGE_SIZE=200;
+function renderLocal(){
+  const box=$("localList");const es=state.local.entries;
+  if(!es.length){box.innerHTML='<div class="empty">空目录</div>';updateSelInfo();return;}
+  box.innerHTML="";
+  const pg={entries:es,rendered:0};
+  box._pg=pg;
+  box.onscroll=()=>{
+    if(box.scrollHeight-box.scrollTop-box.clientHeight<120&&pg.rendered<pg.entries.length){
+      appendLocalRows(box,pg);
+    }
+  };
+  appendLocalRows(box,pg);
+  updateSelInfo();
+}
+function appendLocalRows(box,pg){
+  const start=pg.rendered,end=Math.min(start+BROWSER_PAGE_SIZE,pg.entries.length);
+  const frag=document.createDocumentFragment();
+  for(let i=start;i<end;i++){
+    const e=pg.entries[i];
+    const row=document.createElement("div");row.className="flist-row"+(e.isDir?" dir":"");
+    const chk=document.createElement("input");chk.type="checkbox";chk.checked=state.local.sel.has(e.path);
+    chk.onclick=ev=>{ev.stopPropagation();chk.checked?state.local.sel.add(e.path):state.local.sel.delete(e.path);updateSelInfo();};
+    const ic=document.createElement("span");ic.className="fi "+(e.isDir?"icon-dir":"icon-file");ic.textContent=e.isDir?"📁":"📄";
+    const nm=document.createElement("span");nm.className="fn";nm.textContent=e.name+(e.nameDup>1?` (${e.volume})`:"");
+    const sz=document.createElement("span");sz.className="fs";sz.textContent=e.isDir?"":fmtSize(e.size);
+    const mt=document.createElement("span");mt.className="fm";mt.textContent=fmtTime(e.mtime);
+    row.append(chk,ic,nm,sz,mt);
+    if(e.isDir)row.ondblclick=()=>loadLocal(e.path);
+    row.onclick=()=>{chk.checked=!chk.checked;chk.checked?state.local.sel.add(e.path):state.local.sel.delete(e.path);chk.checked=state.local.sel.has(e.path);updateSelInfo();};
+    frag.appendChild(row);
+  }
+  pg.rendered=end;
+  box.appendChild(frag);
+}
+function updateSelInfo(){
+  const l=state.local.sel.size||0,c=(state.cloud.sel&&state.cloud.sel.size)||0;
+  const el=$("selInfo");if(!el)return;
+  if(!l&&!c){el.innerHTML="未选择";return;}
+  // 只选了本地时保持老文案：上传按钮的语义就是"把左侧勾选传上去"
+  if(l&&!c){el.innerHTML=`已选 ${l} 项`;return;}
+  if(!l){el.innerHTML=`云端已选 ${c} 项`;return;}
+  el.innerHTML=`本地 ${l} · 云端 ${c}`;
+}
+$("localRefresh").onclick=()=>loadLocal(state.local.path);
+$("localUp").onclick=()=>{
+  const p=state.local.path;if(!p)return;
+  const root=state.local.root||"";
+  // 如果当前路径就是根目录，或者上一级是根目录，直接回到聚合视图
+  if(root&&(p===root||p===root+"/")){loadLocal("");return;}
+  const i=p.replace(/\/+$/,"").lastIndexOf("/");
+  const parent=i>0?p.slice(0,i):"";
+  // 如果上一级是根目录，也直接回到聚合视图
+  if(root&&parent===root){loadLocal("");return;}
+  loadLocal(parent);
+};
+
+/* ================= 云端树 ================= */
+async function loadCloud(path,fallback){
+  const target=path||"/";
+  state.cloud.path=target;$("cloudList").innerHTML='<div class="loading"><span class="spin"></span> 加载中…</div>';
+  try{
+    const d=await api("/api/cloud/list?path="+encodeURIComponent(target));
+    state.cloud.entries=d.entries;state.cloud.sel.clear();
+    $("cloudCrumb").innerHTML=crumbHtml(state.cloud.path,"");
+    $("cloudCrumb").querySelectorAll("a").forEach(a=>a.onclick=()=>loadCloud(a.dataset.p||"/"));
+    renderCloud();saveBrowse();autoFillCompareBar();
+    return true;
+  }catch(e){
+    // 记忆里的云端目录可能已被删除 —— 降级到默认根
+    if(fallback!==undefined&&target!==fallback)return loadCloud(fallback,fallback);
+    state.cloud.entries=[];
+    $("cloudList").innerHTML=`<div class="empty">${esc(e.message)}</div>`;
+    return false;
+  }
+}
+function renderCloud(){
+  const box=$("cloudList");const es=state.cloud.entries;
+  if(!es.length){box.innerHTML='<div class="empty">空目录</div>';updateSelInfo();return;}
+  box.innerHTML="";
+  const pg={entries:es,rendered:0};
+  box._pg=pg;
+  box.onscroll=()=>{
+    if(box.scrollHeight-box.scrollTop-box.clientHeight<120&&pg.rendered<pg.entries.length){
+      appendCloudRows(box,pg);
+    }
+  };
+  appendCloudRows(box,pg);
+  updateSelInfo();
+}
+function appendCloudRows(box,pg){
+  const start=pg.rendered,end=Math.min(start+BROWSER_PAGE_SIZE,pg.entries.length);
+  const frag=document.createDocumentFragment();
+  for(let i=start;i<end;i++){
+    const e=pg.entries[i];
+    const row=document.createElement("div");row.className="flist-row"+(e.isDir?" dir":"");
+    // 云端也要能勾选：「勾选两个文件夹后比对」的另一半就在这里
+    const chk=document.createElement("input");chk.type="checkbox";chk.checked=state.cloud.sel.has(e.path);
+    chk.onclick=ev=>{ev.stopPropagation();chk.checked?state.cloud.sel.add(e.path):state.cloud.sel.delete(e.path);updateSelInfo();};
+    const ic=document.createElement("span");ic.className="fi "+(e.isDir?"icon-dir":"icon-file");ic.textContent=e.isDir?"📁":"📄";
+    const nm=document.createElement("span");nm.className="fn";nm.textContent=e.name;
+    const sz=document.createElement("span");sz.className="fs";sz.textContent=e.isDir?"":fmtSize(e.size);
+    const mt=document.createElement("span");mt.className="fm";mt.textContent=(e.modified||"").slice(0,16).replace("T"," ");
+    row.append(chk,ic,nm,sz,mt);
+    if(e.isDir)row.ondblclick=()=>loadCloud(e.path);
+    row.onclick=()=>{chk.checked=!chk.checked;chk.checked?state.cloud.sel.add(e.path):state.cloud.sel.delete(e.path);updateSelInfo();};
+    frag.appendChild(row);
+  }
+  pg.rendered=end;
+  box.appendChild(frag);
+}
+$("cloudRefresh").onclick=()=>loadCloud(state.cloud.path);
+$("cloudMkdir").onclick=async()=>{
+  const name=await askInput("新建文件夹","在 "+state.cloud.path+" 下新建：","","文件夹名");
+  if(!name)return;
+  try{await api("/api/cloud/mkdir",{body:{path:(state.cloud.path.replace(/\/$/,"")+"/"+name)}});loadCloud(state.cloud.path);toast("已创建");}
+  catch(e){askAlert("创建失败",e.message);}
+};
+
+/* ================= 上传 ================= */
+let uploadConfirmTimer=null;
+function resetUploadBtn(){
+  clearTimeout(uploadConfirmTimer);uploadConfirmTimer=null;
+  const b=$("btnUpload");b.textContent="上传 →";b.classList.remove("danger");
+}
+$("btnUpload").onclick=async()=>{
+  const sel=[...state.local.sel];
+  if(!sel.length){toast("请先在左侧勾选文件或文件夹");return;}
+  const b=$("btnUpload");
+  // 两步确认：第一次点进入确认态，第二次点才真正上传
+  if(!uploadConfirmTimer){
+    b.textContent="确认上传 "+sel.length+" 项？";
+    b.classList.add("danger");
+    uploadConfirmTimer=setTimeout(resetUploadBtn,5000);
+    return;
+  }
+  resetUploadBtn();
+  const mode=(state.config&&state.config.localSourceMode)||"fs";
+  b.disabled=true;
+  try{
+    if(mode==="cloud"){
+      const names=sel.map(p=>p.split("/").filter(Boolean).pop()).filter(Boolean);
+      const d=await api("/api/cloud/copy",{body:{srcDir:state.local.path||"/",dstDir:state.cloud.path||"/",names}});
+      toast(`已提交 OpenList 复制 ${d.copied||names.length} 项（进度见 OpenList 任务列表）`);
+      state.local.sel.clear();renderLocal();
+    }else{
+      const d=await api("/api/upload/enqueue",{body:{localPaths:sel,cloudDir:state.cloud.path}});
+      toast(`已加入 ${d.added} 个上传任务`);state.local.sel.clear();renderLocal();loadTasks();
+    }
+  }catch(e){askAlert("操作失败",e.message);}
+  b.disabled=false;
+};
+
+/* ================= 任务队列 ================= */
+let taskTimer=null;
+let queueFilter=uiState.queueFilter||"all";
+const ST_TEXT={pending:"排队中",uploading:"上传中",verifying:"校验中",done:"已完成",failed:"失败",skipped:"已跳过",cancelled:"已取消"};
+const ST_TEXT_DOWN={pending:"排队中",uploading:"下载中",verifying:"校验中",done:"已完成",failed:"失败",skipped:"已跳过",cancelled:"已取消"};
+const QFILTERS={all:()=>true,failed:t=>t.status==="failed",done:t=>t.status==="done",
+  active:t=>t.status==="pending"||t.status==="uploading"||t.status==="verifying"};
+const cnt=(ts,fn)=>ts.filter(fn).length;
+/* 队列响应指纹：只有「会影响这一屏」的字段变了才重绘。
+   之前每 2 秒无条件重建整张表（innerHTML 全清再拼），任务上千时每次轮询
+   都要重排一次 DOM —— 界面"响应慢"有一半是这么来的。 */
+let lastQueueSig="";
+function queueSig(ts){
+  const head=(state.paused?"p":"r");
+  return head+"|"+(ts||[]).map(t=>[t.id,t.status,t.uploaded||0,t.retryAt||0,
+    t.cancelling?1:0,t.error||""].join(":")).join("|");
+}
+let taskFailStreak=0;
+let bindingWarned=false;
+async function loadTasks(){
+  try{
+    // 并行拉取本地上传/下载队列 + OpenList 服务端复制任务，合并显示
+    const [d, ol] = await Promise.all([
+      api("/api/upload/list"),
+      api("/api/openlist/tasks").catch(() => ({ok: true, tasks: []}))
+    ]);
+    // 按 id 去重合并（OpenList 任务 id 以 ol_ 开头，不会冲突）
+    const seen = new Set();
+    const merged = [];
+    for (const t of (d.tasks || [])) { if (!seen.has(t.id)) { seen.add(t.id); merged.push(t); } }
+    for (const t of (ol.tasks || [])) { if (!seen.has(t.id)) { seen.add(t.id); merged.push(t); } }
+    // 稳定排序：传输中 > 失败 > 排队中 > 已完成；同状态按 id 固定顺序，避免轮询时条目来回跳动
+    const RANK = {uploading:0, verifying:0, failed:1, pending:2, done:3, skipped:3, cancelled:3};
+    merged.sort((a,b)=>{
+      const ra = RANK[a.status] ?? 9, rb = RANK[b.status] ?? 9;
+      if (ra !== rb) return ra - rb;
+      return String(a.id).localeCompare(String(b.id));
+    });
+    state.tasks = merged;
+    state.paused = !!d.paused;
+    taskFailStreak = 0;
+    if (d.bindingError) {
+      if (!bindingWarned) { bindingWarned = true; toast("同步备份的任务暂时取不到：" + d.bindingError); }
+    } else { bindingWarned = false; }
+    const sig = queueSig(merged);
+    if (sig !== lastQueueSig) { lastQueueSig = sig; renderQueue(); }
+  } catch (e) {
+    taskFailStreak++;
+    if (taskFailStreak === 3) toast("传输列表刷新失败：" + (e && e.message || e));
+  }
+  syncTaskInterval();
+}
+/* 有任务在跑就 2 秒一问，空闲时降到 8 秒：空闲期无事发生，
+   高频轮询只是白打接口。节奏切换由本次响应决定，所以提交后立刻会提速。 */
+let taskInterval=2000;
+function syncTaskInterval(){
+  const active=(state.tasks||[]).some(t=>QFILTERS.active(t));
+  const want=active?2000:8000;
+  if(want!==taskInterval){taskInterval=want;startTaskLoop();}
+}
+// 传输列表分页状态
+let queuePage=1;
+let queuePageSize=100;
+function renderQueue(){
+  const box=$("queueBody");const ts=state.tasks||[];
+  const nDone=cnt(ts,t=>t.status==="done");
+  const nFailed=cnt(ts,t=>t.status==="failed");
+  const nActive=cnt(ts,t=>QFILTERS.active(t));
+  // 头部统计按状态分色
+  $("queueStat").innerHTML=ts.length?
+    `共 ${ts.length} 项 · <span class="st-done">完成 ${nDone}</span> · `+
+    `<span class="st-failed">失败 ${nFailed}</span> · `+
+    `<span class="st-uploading">进行中 ${nActive}</span>`:"";
+  // 「全部重试」仅当存在失败任务时才出现
+  $("btnRetryAll").classList.toggle("hidden",nFailed===0);
+  // 暂停/恢复按钮文字随状态切换
+  const paused = !!state.paused;
+  const bp = $("btnPause");
+  if(bp){bp.textContent = paused ? "全部恢复" : "全部暂停";}
+  // 筛选按钮高亮
+  document.querySelectorAll("#queueFilter .fbtn").forEach(b=>b.classList.toggle("active",b.dataset.filter===queueFilter));
+  const list=ts.filter(QFILTERS[queueFilter]||QFILTERS.all);
+  if(!ts.length){box.innerHTML='<div class="empty">暂无任务</div>';$("queuePager").style.display="none";return;}
+  if(!list.length){box.innerHTML='<div class="empty">没有符合条件的任务</div>';$("queuePager").style.display="none";return;}
+  // 分页计算
+  const totalPages=Math.max(1,Math.ceil(list.length/queuePageSize));
+  if(queuePage>totalPages)queuePage=totalPages;
+  const start=(queuePage-1)*queuePageSize;
+  const pageItems=list.slice(start,start+queuePageSize);
+  // 更新分页控件
+  $("queuePager").style.display="flex";
+  $("pageInfo").textContent=`第 ${queuePage}/${totalPages} 页 · 显示 ${start+1}-${Math.min(start+queuePageSize,list.length)} / 共 ${list.length} 条`;
+  $("btnPagePrev").disabled=queuePage<=1;
+  $("btnPageNext").disabled=queuePage>=totalPages;
+  // 只渲染当前页
+  box.innerHTML="";
+  pageItems.forEach(t=>{
+    // binding 任务走 OpenList 服务端复制，进度来自任务的 progress 字段（0-100），
+    // 不是本地上传队列的 uploaded/size —— 后者对服务端复制永远是 0，会一直显示 0%。
+    // OpenList 任务和 binding 任务都用服务端返回的 progress（0-100），
+    // 不是本地上传队列的 uploaded/size —— 后者对服务端复制永远是 0。
+    // OpenList 服务端复制任务不返回 progress/size，不显示假进度条，
+    // 只显示状态文字（排队中/复制中/已完成/失败）。
+    const isOlCopy=t.isOpenList&&!t.size;
+    const pct=((t.isOpenList||t.isBinding)&&t.status==="uploading"&&t.progress)?Math.min(100,Number(t.progress)||0)
+      :(t.size?Math.min(100,Math.round(t.uploaded/t.size*100)):(t.status==="done"?100:0));
+    const down=t.direction==="download";
+    const row=document.createElement("div");row.className="qrow";
+    const ic=document.createElement("span");ic.className="fi";
+    // 方向用箭头区分：同一个「传输列表」里混着上传与下载任务，
+    // 光看进度条分不出这个文件是往哪边搬。
+    ic.textContent=(down?"⬇":"⬆")+({done:"✅",failed:"❌",uploading:"",verifying:"🔍",skipped:"⏭",cancelled:"🚫",pending:"⏳"}[t.status]||"⏳");
+    const mid=document.createElement("div");mid.className="qn";
+    // 下载任务的「落点」在本地，所以第二行显示 localPath —— 显示 remotePath
+    // 会让用户以为文件还在云端。
+    const subPath=down?(t.localPath||t.remotePath):t.remotePath;
+    mid.innerHTML=`<div>${esc(t.name)}</div><div class="sub">${down?"↓ ":""}${esc(subPath)}</div>`+
+      // OpenList 复制任务运行中显示转圈，不显示 0% 的假进度条
+      ((t.status==="uploading"||t.status==="verifying")&&!isOlCopy?`<div class="prog"><i style="width:${pct}%"></i></div>`
+       :(isOlCopy&&t.status==="uploading"?`<div class="prog"><i class="indeterminate"></i></div>`:""));
+    const sz=document.createElement("div");sz.style.color="var(--fn-sub)";
+    sz.textContent=isOlCopy?"OpenList 复制":(fmtSize(t.uploaded||0)+" / "+fmtSize(t.size));
+    const st=document.createElement("div");
+    let stx=(down?ST_TEXT_DOWN:ST_TEXT)[t.status]||t.status;
+    if(t.cancelling){
+      // 点了取消、上传循环还没走到分片边界：得让用户看到"点了有反应"
+      stx="取消中…";
+    }else if(t.status==="uploading"&&t.retryAt){
+      // 失败后的退避等待：不显示成"上传中 0%"那种假进度
+      stx=`等待重试 ${Math.max(0,t.retryAt-nowSec())}s`;
+    }else if(t.status==="uploading"&&!isOlCopy){
+      stx+=` ${pct}%`+(t.speed?` · ${fmtSpeed(t.speed)}`:"");
+    }else if(isOlCopy&&t.status==="uploading"){
+      stx="复制中…";
+    }
+    if(t.status==="failed")stx=t.error||ST_TEXT.failed;   // 失败原因完整展示（长文本靠 title + CSS 省略号）
+    st.innerHTML=`<span class="qstat st-${t.status}" title="${esc(t.error||stx)}">${esc(stx)}</span>`;
+    const ops=document.createElement("div");ops.className="qops";
+    const mk=(txt,fn,red)=>{const b=document.createElement("button");b.className="linkbtn"+(red?" red":"");b.textContent=txt;b.onclick=fn;return b;};
+    if(t.isOpenList){
+      // OpenList 原生任务：状态完全由 OpenList 管理，本应用不提供取消/重传/删除。
+      // 给一个跳转到 OpenList 的提示（用户可以去 OpenList 界面管理）。
+      const tag=document.createElement("span");tag.className="hint";tag.style.fontSize="11px";
+      tag.textContent="OpenList 任务";tag.title="在 OpenList 界面可管理此任务";
+      ops.appendChild(tag);
+    }else if(t.isBinding){
+      // 绑定备份走的是 OpenList 服务端复制，任务 id 不在本地上传队列里：
+      // 「取消/重传/删除」打过去只会得到"任务不存在"。这里给一个真正能用的动作。
+      ops.appendChild(mk("查看同步",()=>{
+        if(!t.bindingId)return;
+        bindState.expanded.add(t.bindingId);
+        switchTab("bindings");
+        loadBindings().then(()=>{
+          const card=[...document.querySelectorAll(".bcard")].find(c=>c.dataset.bid===t.bindingId);
+          if(card&&card.scrollIntoView)card.scrollIntoView({block:"center"});
+        });
+      }));
+    }else{
+      if(t.status==="failed")ops.appendChild(mk(down?"重下":"重传",async()=>{await api("/api/upload/retry",{body:{id:t.id}});loadTasks();}));
+      if(t.status==="pending"||t.status==="uploading")ops.appendChild(mk("取消",async()=>{await api("/api/upload/cancel",{body:{id:t.id}});loadTasks();}));
+      if(["done","failed","skipped","cancelled"].includes(t.status))ops.appendChild(mk("删除",async()=>{await api("/api/upload/remove",{body:{id:t.id}});loadTasks();},true));
+    }
+    row.append(ic,mid,sz,st,ops);box.appendChild(row);
+  });
+}
+// 分页控件事件
+$("btnPagePrev").onclick=()=>{if(queuePage>1){queuePage--;renderQueue();}};
+$("btnPageNext").onclick=()=>{queuePage++;renderQueue();};
+$("pageSize").onchange=e=>{queuePageSize=parseInt(e.target.value)||100;queuePage=1;renderQueue();};
+$("btnClearDone").onclick=async()=>{
+  const d=await api("/api/upload/clear",{body:{}});
+  const ol=d.openlistCleared?"，OpenList 已完成任务已清除":"";
+  toast(`已清除 ${d.removed||0} 个本地任务${ol}`);
+  loadTasks();
+};
+$("btnPause").onclick=async()=>{
+  const b=$("btnPause"); if(b.disabled)return; b.disabled=true;
+  try{
+    // 状态只认 state.paused（服务端返回的真值）。之前拿按钮文案反推，
+    // 任务列表为空时永远算成"未暂停"，于是暂停后再也点不回恢复。
+    const next=!state.paused;
+    const d=await api("/api/upload/pause",{body:{paused:next}});
+    state.paused=!!d.paused;
+    const ol=d.paused&&d.openlistPendingCancelled?`，并取消 OpenList 排队中 ${d.openlistPendingCancelled} 个`:"";
+    toast(d.paused?`已暂停：不会再开始新文件（正在传的会传完）${ol}`:"已恢复上传队列");
+    await loadTasks();
+  }catch(e){toast("操作失败："+e.message);}
+  b.disabled=false;
+};
+$("btnCancelAll").onclick=async()=>{
+  const b=$("btnCancelAll"); if(b.disabled)return; b.disabled=true;
+  try{
+    const d=await api("/api/upload/cancel_all",{body:{}});
+    const ol=d.openlistCancelled?`（含 OpenList ${d.openlistCancelled} 个）`:"";
+    toast(`已取消 ${d.cancelled||0} 个任务${ol}`);
+    await loadTasks();
+  }catch(e){toast("取消失败："+e.message);}
+  b.disabled=false;
+};
+document.querySelectorAll("#queueFilter .fbtn").forEach(b=>b.onclick=()=>{
+  queueFilter=b.dataset.filter||"all";uiState.queueFilter=queueFilter;uiPersist();queuePage=1;renderQueue();
+});
+$("btnRetryAll").onclick=async()=>{
+  const b=$("btnRetryAll");
+  if(b.disabled)return;      // 请求进行中禁用，防重复点
+  b.disabled=true;
+  try{const d=await api("/api/upload/retry",{body:{all:true}});toast(`已重新加入 ${d.retried||0} 个任务`);await loadTasks();}
+  catch(e){toast("重试失败："+e.message);}
+  b.disabled=false;
+};
+function startTaskLoop(){clearInterval(taskTimer);taskTimer=setInterval(()=>{
+  if(state.tab==="transfer"||state.tab==="queue")loadTasks();
+},taskInterval);}
+
+/* ================= 双向比对 =================
+   目录比对不再是独立页面 —— 它就是「文件传输」的起点：先比对，再决定往哪个
+   方向搬。差异分三组（仅本地 / 仅云端 / 大小不一致），每组有自己的动作；
+   批量操作统一作用在「已勾选」的行上。 */
+const diffState={data:null,sel:new Set(),filter:null,page:1,pageSize:100};
+// 比对条是否还在"跟随浏览位置"。用户一旦手填路径就置 false，不再自动覆盖。
+let cmpBarAuto=true;
+/* 每一侧比对来源是否被**用户手动选过**（键名 left/right，各自独立）。
+   没选过的那一侧，来源跟着它所属的栏走 —— 左栏在设置里被换成 OpenList 源之后，
+   左侧来源默认就该是「云端」；否则左框会声明成本地、却没有本地栏可跟随
+   （"左栏进了文件夹、上方地址栏不动"就是这么来的）。
+   为什么必须分侧记：只记一个总开关的话，用户动过任何一侧，另一侧就再也不跟栏了。
+   旧存档没有这个标记，只有 cmpLeftSide/cmpRightSide —— 而那两项只在用户动过比对条
+   时才写，所以看到它们就按「用户选过」处理：宁可让用户点一下（引导会说清怎么点），
+   也不要把用户已经选过的侧别悄悄改掉。 */
+function readCmpSideTouched(){
+  const t=uiState.cmpSideTouched;
+  if(t&&typeof t==="object")return {left:!!t.left,right:!!t.right};
+  return {left:uiState.cmpLeftSide!==undefined,right:uiState.cmpRightSide!==undefined};
+}
+let cmpSideTouched=readCmpSideTouched();
+/* 比对两侧的**来源类型**。默认「左本地 / 右云端」（和两栏一致），但这只是默认值：
+   两侧都能切成云端，于是「云端↔云端」这种组合才成立。 */
+const cmpSide={left:"local",right:"cloud"};
+const OTHER_SIDE={left:"right",right:"left"};
+const sideName=side=>side==="cloud"?"云端":"本地";
+const cmpInputOf=which=>$(which==="left"?"cmpLocal":"cmpCloud");
+const cmpPathOf=which=>cmpInputOf(which).value.trim();
+// 四组的渲染元数据。`readonly:true` 的组（已同步）不参与勾选、批量按钮与单行操作 ——
+// 这是刻意的隔离，靠 META 一处声明，而不是散在 renderDiff 里判断 kind 字符串。
+// 注意 key 名 `local` / `cloud` 是**历史遗留**：它们表示「左侧独有」/「右侧独有」，
+// 跟某一侧是不是云端无关（两侧都可能是云端）。真正的侧别看 cmpSide。
+const DIFF_GROUP_META={
+  local:{cls:"local",readonly:false},
+  cloud:{cls:"cloud",readonly:false},
+  mismatch:{cls:"mismatch",readonly:false},
+  same:{cls:"same",readonly:true},
+};
+/* 侧别的显示名。两侧**同类**时必须带上左右 —— 两个都叫「云端」用户分不清谁是谁，
+   「用云端覆盖云端」这种按钮更是完全说不通。 */
+function sideLabel(which){
+  const side=diffSideOf(which),other=diffSideOf(OTHER_SIDE[which]);
+  return side===other?(which==="left"?"左侧":"右侧")+sideName(side):sideName(side);
+}
+/* 从当前结果里读侧别 / 根路径。三个取数函数都带**旧响应兜底**：
+   服务端还没跟着升级时，按默认的「左本地 / 右云端」解释，不至于整页崩掉。 */
+function diffSideOf(which){
+  const node=(diffState.data||{})[which];
+  const side=node&&node.side;
+  return (side==="local"||side==="cloud")?side:cmpSide[which];
+}
+function diffRootOf(which){
+  const node=(diffState.data||{})[which];
+  if(node&&node.path!==undefined&&node.path!==null)return node.path;
+  const d=diffState.data||{};
+  return which==="left"?(d.localRoot||""):(d.cloudRoot||"/");
+}
+/* 条目在某一侧的绝对路径：优先用服务端算好的 `absPath` / `peerAbsPath`。
+   服务端用 `owner` 说明 `absPath` 属于哪一侧（`notUploaded` 与 `cloudOnly`
+   两个列表的 `absPath` 分属左右），所以这里只要判断"要的是不是 owner 那一侧"。
+   两侧都可能是云端之后，前端按"左=本地、右=云端"去拼路径就会拼错 ——
+   只有在旧服务端（没给这些字段）时才回退到拼接。 */
+function entryAbs(e,which){
+  const want=(e.owner&&e.owner!==which)?"peerAbsPath":"absPath";
+  const hit=e[want];
+  if(hit)return hit;
+  return joinSidePath(diffSideOf(which),diffRootOf(which),e.path);
+}
+/* 把内容从 from 侧送到 to 侧，这个动作叫什么。 */
+function transferVerb(from,to){
+  if(from==="local"&&to==="cloud")return "上传";
+  if(from==="cloud"&&to==="local")return "下载";
+  return "复制";
+}
+/* 按钮文案。同样是"复制"，两个方向必须能分开，所以带上左右。 */
+function transferBtnLabel(fromWhich,toWhich){
+  const from=diffSideOf(fromWhich),to=diffSideOf(toWhich);
+  if(transferVerb(from,to)==="复制")
+    return "复制到"+(toWhich==="left"?"左侧":"右侧");
+  return transferVerb(from,to);
+}
+function groupChip(kind){
+  if(kind==="local")return "仅左侧";
+  if(kind==="cloud")return "仅右侧";
+  if(kind==="mismatch")return "大小不一致";
+  return "已同步";
+}
+function groupTitle(kind){
+  if(kind==="local")
+    return "仅"+sideLabel("left")+"有（可"+transferBtnLabel("left","right")+"到"
+      +sideLabel("right")+"，也可清除"+sideLabel("left")+"）";
+  if(kind==="cloud")
+    return "仅"+sideLabel("right")+"有（可"+transferBtnLabel("right","left")+"到"
+      +sideLabel("left")+"，也可清除"+sideLabel("right")+"）";
+  if(kind==="mismatch")return "两侧都有但大小不一致";
+  return "已同步（两侧大小一致的文件）";
+}
+// 状态筛选开关的顺序 = 展示顺序。四个都能点，点了只看该类，再点恢复完整列表。
+const DIFF_FILTERS=["local","cloud","mismatch","same"];
+const diffKey=(kind,path)=>kind+"|"+path;
+/* 拼进 `[data-key="…"]` 选择器时要转义的字符：路径里含引号/反斜杠并不罕见
+   （Windows 路径、带引号的文件名），不转义会直接抛 SyntaxError 把整页打断。 */
+const attrEsc=s=>String(s==null?"":s).replace(/[\\"]/g,"\\$&");
+const joinLocalPath=(root,rel)=>String(root||"").replace(/[\\/]+$/,"")+"/"+rel;
+const joinCloudPath=(root,rel)=>((String(root||"/").replace(/\/+$/,""))+"/"+rel).replace(/\/{2,}/g,"/");
+const joinSidePath=(side,root,rel)=>side==="cloud"?joinCloudPath(root,rel):joinLocalPath(root,rel);
+const diffEntries=(kind)=>{
+  const d=diffState.data;if(!d)return [];
+  const r=d.result||{};
+  if(kind==="local")return r.localExtra||[];
+  if(kind==="cloud")return r.cloudExtra||[];
+  if(kind==="same")return r.same||[];
+  return r.mismatch||[];
+};
+/* 当前**可见**的条目 key。有筛选时就是那一类，没有就是三组差异。
+   "全选"按它取值 —— 筛出"仅本地"本来就是为了集中处理，此时全选应当只选中这些，
+   而不是把看不见的其它组的行也一起勾上。 */
+function visibleDiffKeys(){
+  const kinds=diffState.filter?[diffState.filter]:["local","cloud","mismatch"];
+  const out=[];
+  kinds.forEach(k=>diffEntries(k).forEach(e=>out.push(diffKey(k,e.path))));
+  return out;
+}
+const sumBytes=es=>es.reduce((a,e)=>a+(e.isDir?0:(Number(e.size)||0)),0);
+
+/* 某一栏「用来比对」的目录：恰好勾选一个文件夹就用它，否则用当前所在目录。
+   这样「勾选两个文件夹后点比对」与「停在哪就比哪」两种习惯都成立。
+   参数 `side` 是**栏位**（local / cloud 两栏固定），不是比对来源 ——
+   比对来源选云端时，就是去云端那一栏取目录。 */
+function selectedDirs(side){
+  const st=state[side]||{};const out=[];
+  (st.entries||[]).forEach(e=>{if(e.isDir&&st.sel&&st.sel.has(e.path))out.push(e.path);});
+  return out;
+}
+function paneCompareRoot(side){
+  const dirs=selectedDirs(side);
+  if(dirs.length===1)return dirs[0];
+  return (state[side]&&state[side].path)||(side==="cloud"?"/":"");
+}
+
+/* 一「栏」的**实际来源类型**。左栏不一定是本地 —— 设置里的「文件传输左侧来源」
+   可以把左栏换成 OpenList（`localSourceMode==="cloud"`），那时左栏浏览的就是云端
+   目录，它的来源类型是 cloud；右栏恒为云端。
+   映射必须看「栏」，而不是看「栏位名字」：左栏是 OpenList 源时，界面上会同时有
+   **两个**云端栏（左栏 + 右栏），「一种来源类型只有一个栏」这个假设不再成立。 */
+function paneSide(pane){
+  if(pane==="cloud")return "cloud";
+  return ((state.config&&state.config.localSourceMode)==="cloud")?"cloud":"local";
+}
+/* 每一栏自己的起始目录（给比对框取默认值用）。 */
+function paneSourceRoot(pane){
+  const c=state.config||{};
+  if(pane==="cloud")return c.cloudRoot||"/";
+  return paneSide(pane)==="cloud"?(c.localSourceRoot||"/"):(c.localRoot||"");
+}
+/* 每个比对框该跟随哪一「栏」—— 把栏**唯一分配**给框，一个栏绝不服务两个框。
+   这里曾经写的是「按来源类型去取 state[side].path」，于是两侧都选云端时，
+   两个框都去读云端栏的当前位置：浏览右栏会把**两个框**改成同一个路径，点比对
+   必然报「两侧是同一个位置」—— 而云端只有一个浏览栏，用户没有别的办法把它们分开。
+   2.9.3 据此改成"同源时只让一个框跟随"，但那仍然假设「一种来源类型只有一个栏」。
+   左栏能切成 OpenList 之后这个假设也倒了：左栏就是第二个云端栏，两侧完全可以
+   各自跟着自己的栏走。所以判据是**框声明的来源类型**与**栏的实际来源类型**相符，
+   而不是栏位名字对不对得上：
+     ① 位置对齐优先（左框↔左栏、右框↔右栏），但栏的来源类型必须相符
+     ② 剩下的框再按类型认领一个还没被占用的栏
+   于是（括号内是栏的实际来源）：
+     左栏本地/右栏云端：本地↔云端 → 各跟各的（与旧行为逐字一致）
+                        云端↔云端 → 只有右框跟云端栏，左框不动（另一端手填）
+                        本地↔本地 → 对称，只有左框跟本地栏
+                        云端↔本地 → 交叉，每一栏都有人领
+     左栏云端/右栏云端：云端↔云端 → 左框跟左栏、右框跟右栏，**两个框各跟各的** */
+function cmpPaneMap(){
+  const out={left:null,right:null},taken={};
+  [["left","local"],["right","cloud"]].forEach(([w,p])=>{
+    if(paneSide(p)===cmpSide[w]&&!taken[p]){out[w]=p;taken[p]=true;}
+  });
+  ["left","right"].forEach(w=>{
+    if(out[w])return;
+    const p=["local","cloud"].find(x=>paneSide(x)===cmpSide[w]&&!taken[x]);
+    if(p){out[w]=p;taken[p]=true;}
+  });
+  return out;
+}
+function cmpPaneOf(which){return cmpPaneMap()[which];}
+/* 某个比对框该取的默认路径：优先用它**所属栏**自己的起始目录
+   （左栏是 OpenList 源时就是它的 OpenList 起始路径，而不是配置里的本地目录）。 */
+function cmpRootFor(which){
+  const pane=cmpPaneOf(which);
+  if(pane)return paneSourceRoot(pane);
+  const c=state.config||{};
+  return cmpSide[which]==="cloud"?(c.cloudRoot||"/"):(c.localRoot||"");
+}
+
+/* 把两侧的来源切换按钮与输入框提示刷成当前状态。 */
+function renderCmpSides(){
+  ["left","right"].forEach(which=>{
+    const side=cmpSide[which];
+    const box=$(which==="left"?"cmpSrcLeft":"cmpSrcRight");
+    if(box)box.querySelectorAll("[data-cmp-side]").forEach(b=>{
+      const on=b.dataset.cmpSide===side;
+      b.classList.toggle("on",on);
+      b.setAttribute("aria-pressed",on?"true":"false");
+      b.title="把"+(which==="left"?"左侧":"右侧")+"的来源设为"+sideName(b.dataset.cmpSide);
+    });
+    const input=cmpInputOf(which);
+    if(input)input.placeholder=side==="cloud"?"云端目录，如 /backup/相册"
+                                          :"本地目录，如 /vol1/1000/相册";
+  });
+  renderCmpHint();
+}
+/* 比对条的操作说明。「默认左X、右Y」要按栏的**实际来源**写：左栏被设置换成
+   OpenList 源之后，"默认左本地"就是错的，会让人以为 Left 那个框该填 NAS 路径。 */
+function cmpHintBase(){
+  return '点两侧的 <strong>本地 / 云端</strong> 切换来源（默认左<strong>'+
+    sideName(paneSide("local"))+'</strong>、右<strong>'+sideName(paneSide("cloud"))+
+    '</strong>），在下面两栏里<strong>各勾选一个文件夹</strong>再点中栏「比对」会自动填好路径；'+
+    '也可以直接改上面的路径。比对只读，不会改动任何文件。';
+}
+/* 有的比对框可能**根本没有栏可跟随**，那就只能手填。不明说的话用户会以为
+   "我明明在浏览那一栏"，然后在同一个位置上来回试。判据是映射结果，不是
+   「两侧来源是否相同」—— 左栏是 OpenList 源时，两侧同源也照样各跟各的栏。
+   两种成因要分开说（给的补救办法不一样）：
+     a) 界面上**没有该类型的栏** —— 左栏在设置里被换成了 OpenList 源，就没有本地栏了
+     b) 该类型**只有一个栏**，且它被另一侧占着 —— 左栏是本地时只有一个云端栏 */
+function renderCmpHint(){
+  const el=$("cmpHint");
+  if(!el)return;
+  const pane=cmpPaneMap();
+  const loose=["left","right"].filter(w=>!pane[w]);
+  if(!loose.length){
+    el.classList.remove("warn");
+    // mode 里带上左栏来源：设置里换了来源模式后，"默认左X"这句必须跟着重写
+    const mode="base:"+paneSide("local");
+    if(el.dataset.mode!==mode){el.innerHTML=cmpHintBase();el.dataset.mode=mode;}
+    return;
+  }
+  const side=cmpSide[loose[0]],name=sideName(side);
+  const who=loose.map(w=>"<strong>"+(w==="left"?"左侧":"右侧")+"</strong>").join("、");
+  const avail=["local","cloud"].filter(p=>paneSide(p)===side);
+  let why;
+  if(!avail.length){
+    why="左栏已经在<strong>设置里换成了 OpenList 源</strong>，界面上<strong>没有"+name+
+        "栏</strong>，它没有可以跟随的位置 —— 请把它也切成<strong>云端</strong>，或手动填写路径";
+  }else{
+    const whose=avail[0]==="local"?"左侧":"右侧";
+    why="界面上只有<strong>一个"+name+"栏</strong>（"+(avail[0]==="local"?"左栏":"右栏")+
+        "），它只会带动 <strong>"+whose+"</strong> 的路径，另一侧请在上面<strong>手动填写</strong>"+
+        "要对比的目录";
+  }
+  el.dataset.mode="loose";
+  el.classList.add("warn");
+  el.innerHTML=who+"的来源是 <strong>"+name+"</strong>，但"+why+"。"+
+    "两侧指向同一个位置是比不出差异的。";
+}
+function clearCmpError(){
+  ["cmpLocal","cmpCloud"].forEach(id=>{const el=$(id);if(el)el.classList.remove("bad");});
+}
+/* 服务端的错误消息里带着「左侧 / 右侧」，据此把出问题的那一侧输入框标红 ——
+   只弹一句"加载失败"，用户不知道该去改哪一个框。 */
+function markCmpError(msg){
+  clearCmpError();
+  const s=String(msg||"");
+  ["left","right"].forEach(w=>{
+    if(s.indexOf(w==="left"?"左侧":"右侧")>=0)cmpInputOf(w).classList.add("bad");
+  });
+}
+/* 切换某一侧来源。换来源之后原来的路径多半已经不成立（把一串本地路径拿去比云端
+   只会白报错），所以直接换成该来源栏当前的目录，省得用户自己清空重填。
+   例外：这次切换若让**两侧同源**（云端↔云端 / 本地↔本地），下面只剩一个同类型的
+   栏，这一侧未必分得到它 —— 分不到就留空，别预填出一个"注定比不出差异"的同款路径。 */
+function setCmpSide(which,side){
+  if(side!=="local"&&side!=="cloud")return;
+  if(cmpSide[which]===side)return;
+  cmpSide[which]=side;
+  // 从这一刻起，这一侧的来源是用户自己定的：不再被「设置里换了左栏来源」带着走。
+  cmpSideTouched[which]=true;
+  cmpInputOf(which).value=cmpRootFor(which)||"";
+  cmpBarAuto=true;
+  clearCmpError();
+  renderCmpSides();
+  captureCompare();
+  // 左侧切换时同步切换左栏的来源类型（本地/云端），并重新加载左栏目录
+  if(which==="left"){
+    const mode=side==="cloud"?"cloud":"fs";
+    state.config=state.config||{};
+    state.config.localSourceMode=mode;
+    // 保存到后端（静默失败：切栏是高频操作，保存失败不该打断浏览）
+    api("/api/config",{body:{localSourceMode:mode}}).catch(e=>console.warn("保存左栏来源失败：",e));
+    // 从对应起始路径重新加载左栏
+    const root=mode==="cloud"?(state.config.localSourceRoot||"/"):(state.config.localRoot||"");
+    loadLocal(root,root);
+  }
+}
+/* 「用两栏当前位置填充」按钮：每一栏填给它负责的那个框。两侧同源时只有一个栏，
+   就只填一侧，不去把另一侧也改成同一个位置。 */
+function syncCompareBar(fill){
+  if(fill){
+    const pane=cmpPaneMap();
+    ["left","right"].forEach(w=>{
+      if(pane[w])cmpInputOf(w).value=paneCompareRoot(pane[w])||"";
+    });
+    cmpBarAuto=true;
+    captureCompare();
+  }
+  clearCmpError();
+  renderCmpSides();
+  $("cmpBar").classList.toggle("isfilled",!!cmpPathOf("left"));
+}
+/* 比对条跟随当前浏览位置（用户手填过就不再自动覆盖）。
+   合并成单页之后，"我在哪一栏就比哪一栏"是最省心的默认。
+   关键：**只动自己那一栏负责的框**。两侧同源时另一个框没有栏，浏览它时不许被改写
+   —— 否则两个框会被同步成同一个路径（这是「云端↔云端」下最刺眼的一个 bug）。 */
+function autoFillCompareBar(){
+  if(cmpBarAuto){
+    const pane=cmpPaneMap();
+    ["left","right"].forEach(w=>{
+      if(!pane[w])return;
+      const st=state[pane[w]];
+      cmpInputOf(w).value=(st&&st.path)||"";
+    });
+  }
+  $("cmpBar").classList.toggle("isfilled",!!cmpPathOf("left"));
+}
+
+function diffLoading(msg){
+  diffState.data=null;diffState.sel.clear();diffState.page=1;diffState.filter=null;
+  const pane=$("diffPane");
+  pane.classList.remove("hidden");
+  pane.classList.add("diff-collapsed");
+  $("diffHead").innerHTML="";
+  $("cmpOut").innerHTML=`<div class="loading"><span class="spin"></span> ${esc(msg)}</div>`;
+  // 强制重排后再展开，确保从下到上的滑入动画生效
+  void pane.offsetHeight;
+  setTimeout(()=>{
+    pane.classList.remove("diff-collapsed");
+    if($("diffToggle"))$("diffToggle").textContent="收起";
+  },30);
+}
+
+async function runCompare(){
+  const sides={left:cmpSide.left,right:cmpSide.right};
+  const paths={left:cmpPathOf("left"),right:cmpPathOf("right")};
+
+  clearCmpError();
+  // 本地那一侧不能留空；云端那一侧留空 = 从云端根目录开始比，
+  // 不必逼用户手打一个 "/"。
+  const missing=[];
+  ["left","right"].forEach(w=>{if(sides[w]==="local"&&!paths[w])missing.push(w);});
+  if(missing.length){
+    missing.forEach(w=>cmpInputOf(w).classList.add("bad"));
+    toast(missing.map(w=>w==="left"?"左侧":"右侧").join("、")+"的本地目录不能为空");
+    return;
+  }
+  ["left","right"].forEach(w=>{if(sides[w]==="cloud"&&!paths[w])paths[w]="/";});
+  if(sides.left===sides.right&&paths.left===paths.right){
+    // 两侧标红 + 说清"改哪边都行"：只说一句"比不出差异"，用户不知道该动哪个框
+    ["left","right"].forEach(w=>cmpInputOf(w).classList.add("bad"));
+    toast("两侧都是"+sideName(sides.left)+"、且都指向 "+(paths.left||"/")+
+          " —— 同一个位置比不出差异，请把其中一侧改到别的目录");
+    return;
+  }
+
+  diffLoading("正在比对（自动递归到最底层，云端目录越大越久）…");
+  try{
+    // 深度固定为 999（后端上限），自动探索文件夹到底，避免遗漏文件
+    const body={left:{side:sides.left,path:paths.left},
+                right:{side:sides.right,path:paths.right},
+                depth:999};
+    const d=await api("/api/compare",{body});
+    diffState.data=d;diffState.sel.clear();diffState.page=1;diffState.filter=null;
+    renderCmpSides();
+    renderDiff();
+  }catch(e){
+    diffState.data=null;
+    markCmpError(e.message);
+    $("cmpOut").innerHTML=`<div class="empty" style="color:var(--fn-red)">${esc(e.message)}</div>`;
+  }
+}
+$("btnCompare").onclick=runCompare;
+$("btnComparePick").onclick=()=>{syncCompareBar(true);runCompare();};
+$("cmpBar").querySelectorAll("[data-cmp-side]").forEach(b=>{
+  b.onclick=()=>setCmpSide(b.dataset.cmpWhich,b.dataset.cmpSide);
+});
+
+function selectedDiffRows(){
+  const picked={local:[],cloud:[],mismatch:[]};
+  Object.keys(picked).forEach(k=>{
+    diffEntries(k).forEach(e=>{if(diffState.sel.has(diffKey(k,e.path)))picked[k].push(e);});
+  });
+  return picked;
+}
+function diffRowByKey(key){
+  const i=String(key||"").indexOf("|");
+  if(i<0)return null;
+  const kind=key.slice(0,i),path=key.slice(i+1);
+  return diffEntries(kind).find(e=>e.path===path)||null;
+}
+
+function renderDiff(){
+  const d=diffState.data;
+  if(!d){$("diffPane").classList.add("hidden");return;}
+  const r=d.result||{};
+  const nLocal=diffEntries("local").length,nCloud=diffEntries("cloud").length,
+        nMis=diffEntries("mismatch").length;
+  const total=nLocal+nCloud+nMis;
+  // 徽标上的「已同步」是**文件数**（sameCount）。旧口径是"大小一致的文件 + 两边都存在
+  // 的目录"，但目录路径存在并不代表里面传完了 —— 按旧口径算，这个数字会与筛出来的
+  // 列表条数对不上（用户点开只会看到文件）。目录数单独在分组头里交代。
+  const nSame=Number(r.sameCount||0);
+  const nSameDirs=Number(r.uploadedDirs||0);
+  const filt=diffState.filter;
+  const counts={local:nLocal,cloud:nCloud,mismatch:nMis,same:nSame};
+  const depthTxt=(d.depth===undefined)?"默认":(d.depth>=999?"不限":String(d.depth));
+
+  // 状态标签 = 筛选开关。选中态同时用底色/描边/加粗/✓ 四种信号，
+  // 不靠颜色单独区分（色弱用户也要能看出哪一枚是按下的）。
+  const chip=(key)=>{
+    const m=DIFF_GROUP_META[key],n=counts[key],on=(filt===key);
+    const label=groupChip(key);
+    return `<button type="button" class="dstat ${m.cls}${on?" on":""}${n?"":" zero"}"`
+      +` data-filter="${key}" aria-pressed="${on?"true":"false"}"`
+      +` title="只看「${esc(label)}」；再点一次恢复完整列表"><b>${n}</b>${esc(label)}</button>`;
+  };
+
+  // 只移除 hidden，不强制移除 diff-collapsed：用户手动收起后切换筛选/重新渲染
+  // 时保持收起状态，不再被强制弹开。首次显示的展开动画由 diffLoading 负责。
+  $("diffPane").classList.remove("hidden");
+  $("diffHead").innerHTML=
+    `<div class="diff-head-row">
+      <span class="diff-stats">${DIFF_FILTERS.map(chip).join("")}</span>
+      <span class="dhr-actions">
+        <button class="linkbtn" id="diffAll">${filt?"全选本组":"全选"}</button>
+        <button class="linkbtn" id="diffNone">清空勾选</button>
+        <button class="btn small" id="diffUpload">上传选中</button>
+        <button class="btn small" id="diffDownload">下载选中</button>
+        <button class="btn small danger" id="diffClear">清除选中</button>
+        <button class="linkbtn" id="diffToggle">收起</button>
+        <button class="linkbtn" id="diffRerun">重新比对</button>
+      </span>
+    </div>
+    <div class="diff-root">${esc(sideLabel("left"))} <b>${esc(diffRootOf("left"))}</b>
+      ⇄ ${esc(sideLabel("right"))} <b>${esc(diffRootOf("right"))}</b>
+      · 深度 ${esc(depthTxt)}</div>`
+    +(filt?`<div class="diff-filter-note">正在只看「${esc(groupChip(filt))}」· 点同一枚标签取消筛选，恢复完整列表</div>`:"");
+
+  // 点标签切筛选：纯前端重渲染，立即生效、不重新请求后端。
+  // 筛选**只影响显示** —— 勾选（diffState.sel）按 key 存，被筛掉的行不会掉勾，
+  // 取消筛选后原样回来。
+  $("diffHead").querySelectorAll("[data-filter]").forEach(b=>{
+    b.onclick=()=>{
+      const k=b.dataset.filter;
+      diffState.filter=(diffState.filter===k)?null:k;
+      diffState.page=1;  // 筛选变化时回到第一页
+      renderDiff();
+    };
+  });
+
+  const box=$("cmpOut");
+  const kinds=filt?[filt]:["local","cloud","mismatch"];
+  // 收集所有可见条目（考虑筛选），用于分页
+  let allVisible=[];
+  kinds.forEach(kind=>{
+    const list=diffEntries(kind);
+    list.forEach(e=>allVisible.push({kind,e}));
+  });
+  const totalVisible=allVisible.length;
+  // 分页计算
+  const pageSize=diffState.pageSize;
+  let page=diffState.page;
+  const totalPages=Math.max(1,Math.ceil(totalVisible/pageSize));
+  if(page>totalPages)page=totalPages;
+  const startIdx=(page-1)*pageSize;
+  const endIdx=Math.min(startIdx+pageSize,totalVisible);
+  const pageItems=allVisible.slice(startIdx,endIdx);
+
+  if(!total&&!filt){
+    box.innerHTML=`<div class="diff-empty">两边已经完全一致，没有差异 🎉</div>`;
+  }else{
+    let html="";
+    // 按 kind 分组渲染当前页的条目
+    const kindsInPage={};
+    pageItems.forEach(item=>{
+      if(!kindsInPage[item.kind])kindsInPage[item.kind]=[];
+      kindsInPage[item.kind].push(item.e);
+    });
+    kinds.forEach(kind=>{
+      const list=kindsInPage[kind]||[];
+      const fullList=diffEntries(kind);
+      const m=DIFF_GROUP_META[kind];
+      if(!filt&&!fullList.length)return;
+      let count=`${fullList.length} 项`;
+      if(kind==="same"){
+        const shown=fullList.length,want=Number(r.sameCount||shown);
+        count=`${want} 项`
+          +(shown<want?`，仅列出前 ${shown} 条`:"")
+          +(nSameDirs?` · 另有 ${nSameDirs} 个目录两边都存在（路径存在≠内容齐全，不逐条列出）`:"");
+      }
+      html+=`<div class="dgrp-head ${m.cls}">
+        <span>${esc(groupTitle(kind))}</span>
+        <span class="gcount">${esc(count)}</span>
+        ${m.readonly?"":`<span class="gsel"><button class="linkbtn" data-grp="${esc(kind)}">全选本组</button></span>`}</div>`;
+      if(!list.length){
+        if(filt)html+=`<div class="diff-empty grey">这一类当前没有条目</div>`;
+        return;
+      }
+      list.forEach(e=>{
+        const key=diffKey(kind,e.path);
+        const on=diffState.sel.has(key);
+        if(m.readonly){
+          html+=`<div class="drow readonly" data-key="${esc(key)}">
+            <span></span>
+            <span class="dpath" title="${esc(e.path)}">📄 <span class="dname">${esc(e.path)}</span></span>
+            <span class="dsz">${fmtSize(e.size)}</span>
+            <span class="dsz"></span>
+            <span class="dops">${diffRowOps(kind,e)}</span></div>`;
+          return;
+        }
+        html+=`<div class="drow${on?" sel":""}" data-key="${esc(key)}">
+          <input type="checkbox" class="dchk" data-key="${esc(key)}"${on?" checked":""}>
+          <span class="dpath" title="${esc(e.path)}">${e.isDir?"📁":"📄"} <span class="dname">${esc(e.path)}</span></span>
+          <span class="dsz">${e.isDir?"目录":fmtSize(e.size)}</span>
+          <span class="dsz">${kind==="mismatch"?(esc(sideLabel("right"))+" "+fmtSize(e.cloudSize)):""}</span>
+          <span class="dops">${diffRowOps(kind,e)}</span></div>`;
+      });
+    });
+    // 分页控件
+    if(totalVisible>pageSize){
+      html+=`<div class="diff-pager">
+        <span class="dp-info">第 ${startIdx+1}-${endIdx} 条 / 共 ${totalVisible} 条</span>
+        <button class="btn small ghost" id="diffPrevPage" ${page<=1?"disabled":""}>上一页</button>
+        <span class="dp-page">${page} / ${totalPages}</span>
+        <button class="btn small ghost" id="diffNextPage" ${page>=totalPages?"disabled":""}>下一页</button>
+        <select id="diffPageSize" class="dp-size">
+          <option value="50" ${pageSize===50?"selected":""}>50条/页</option>
+          <option value="100" ${pageSize===100?"selected":""}>100条/页</option>
+          <option value="200" ${pageSize===200?"selected":""}>200条/页</option>
+          <option value="500" ${pageSize===500?"selected":""}>500条/页</option>
+        </select>
+      </div>`;
+    }
+    box.innerHTML=html;
+    // 事件绑定（用事件委托优化，只绑定一次）
+    box.onclick=ev=>{
+      const t=ev.target;
+      // checkbox
+      if(t.classList&&t.classList.contains("dchk")){
+        ev.stopPropagation();
+        const key=t.dataset.key;
+        if(t.checked)diffState.sel.add(key);else diffState.sel.delete(key);
+        const row=t.closest(".drow");
+        if(row)row.classList.toggle("sel",t.checked);
+        updateDiffActionState();
+        return;
+      }
+      // 分组全选按钮
+      const grpBtn=t.closest("[data-grp]");
+      if(grpBtn){
+        const grp=grpBtn.dataset.grp;
+        if(DIFF_GROUP_META[grp]&&DIFF_GROUP_META[grp].readonly)return;
+        diffEntries(grp).forEach(e=>diffState.sel.add(diffKey(grp,e.path)));
+        renderDiff();
+        return;
+      }
+      // 行操作按钮
+      const actBtn=t.closest("[data-act]");
+      if(actBtn){
+        diffRowAction(actBtn.dataset.act,actBtn.dataset.kind,actBtn.dataset.path);
+        return;
+      }
+      // 整行点击切换勾选
+      const row=t.closest(".drow");
+      if(row&&!t.closest("button")){
+        const c=row.querySelector(".dchk");
+        if(c){
+          c.checked=!c.checked;
+          const key=c.dataset.key;
+          if(c.checked)diffState.sel.add(key);else diffState.sel.delete(key);
+          row.classList.toggle("sel",c.checked);
+          updateDiffActionState();
+        }
+      }
+    };
+    // 分页按钮事件
+    const prevBtn=$("diffPrevPage");
+    if(prevBtn)prevBtn.onclick=()=>{diffState.page=Math.max(1,page-1);renderDiff();};
+    const nextBtn=$("diffNextPage");
+    if(nextBtn)nextBtn.onclick=()=>{diffState.page=Math.min(totalPages,page+1);renderDiff();};
+    const sizeSel=$("diffPageSize");
+    if(sizeSel)sizeSel.onchange=()=>{diffState.pageSize=parseInt(sizeSel.value)||100;diffState.page=1;renderDiff();};
+  }
+  // "全选"作用于**当前可见**的条目：筛出某一类本来就是为了集中处理它。
+  // 筛到「已同步」（只读、无批量动作）时无意义，直接禁用而不是给一个点了没反应的按钮。
+  $("diffAll").onclick=()=>{visibleDiffKeys().forEach(k=>diffState.sel.add(k));renderDiff();};
+  $("diffAll").disabled=!!(filt&&DIFF_GROUP_META[filt].readonly);
+  if($("diffAll").disabled)$("diffAll").title="「已同步」不需要处理";
+  $("diffNone").onclick=()=>{diffState.sel.clear();renderDiff();};
+  const toggleDiff=()=>{
+    const col=$("diffPane").classList.toggle("diff-collapsed");
+    $("diffToggle").textContent=col?"展开":"收起";
+  };
+  $("diffToggle").onclick=(e)=>{e.stopPropagation();toggleDiff();};
+  $("diffHead").onclick=(e)=>{
+    // 点击标题栏空白处收起/展开，点击按钮不触发
+    if(e.target.closest("button,input,select,a"))return;
+    toggleDiff();
+  };
+  $("diffRerun").onclick=()=>runCompare();
+  $("diffUpload").onclick=diffUploadSelected;
+  $("diffDownload").onclick=diffDownloadSelected;
+  $("diffClear").onclick=diffClearSelected;
+  // 渲染后同步按钮文字：用户手动收起后重新渲染，按钮文字要跟着变
+  $("diffToggle").textContent=$("diffPane").classList.contains("diff-collapsed")?"展开":"收起";
+  updateDiffActionState();
+}
+
+function diffRowOps(kind,e){
+  if(DIFF_GROUP_META[kind]&&DIFF_GROUP_META[kind].readonly)
+    return `<span class="dtag">已同步</span>`;
+  const p=esc(e.path);
+  const op=(act,text,danger)=>`<button class="linkbtn${danger?" red":""}"`
+    +` data-act="${act}" data-kind="${esc(kind)}" data-path="${p}">${esc(text)}</button>`;
+  // 「左侧独有」→ 送去右侧；「右侧独有」→ 送去左侧。
+  // 送去之后这个动作叫什么（上传 / 下载 / 复制）由**两侧各自的类型**决定。
+  if(kind==="local")
+    return op("toRight",transferBtnLabel("left","right"))
+         + op("clearLeft","清除"+sideLabel("left"),true);
+  if(kind==="cloud")
+    return op("toLeft",transferBtnLabel("right","left"))
+         + op("clearRight","清除"+sideLabel("right"),true);
+  return op("toRight","用"+sideLabel("left")+"覆盖")
+       + op("toLeft","用"+sideLabel("right")+"覆盖");
+}
+
+function updateDiffActionState(){
+  const picked=selectedDiffRows();
+  // 「仅左侧有」+「大小不一致」→ 送到右侧；「仅右侧有」+「大小不一致」→ 送到左侧。
+  const nToRight=picked.local.length+picked.mismatch.length;
+  const nToLeft=picked.cloud.length+picked.mismatch.length;
+  const nClear=picked.local.length+picked.cloud.length;
+  const set=(id,n,base)=>{const b=$(id);if(!b)return;b.textContent=n?base+" ("+n+")":base;b.disabled=n===0;};
+  // id 仍叫 upload / download（默认组合下文案正是"上传选中 / 下载选中"），
+  // 但两侧都是云端时它们其实是"复制到右侧 / 复制到左侧" —— 文案按侧别给。
+  set("diffUpload",nToRight,transferBtnLabel("left","right")+"选中");
+  set("diffDownload",nToLeft,transferBtnLabel("right","left")+"选中");
+  set("diffClear",nClear,"清除选中");
+}
+
+/* 行内操作：把这一行当成只含它的选择，复用批量逻辑 */
+function diffRowAction(act,kind,path){
+  const entry=diffEntries(kind).find(e=>e.path===path);
+  if(!entry)return;
+  if(act==="toRight")return doDiffTransfer("left","right",[entry]);
+  if(act==="toLeft")return doDiffTransfer("right","left",[entry]);
+  if(act==="clearLeft")return doDiffClear([{which:"left",entry:entry}]);
+  if(act==="clearRight")return doDiffClear([{which:"right",entry:entry}]);
+}
+
+/* ---- 把一侧的条目送到另一侧：四象限统一入口 ----
+   实际落到哪条链路由**两侧各自的类型**决定：本地→云端走上传队列、云端→本地走
+   下载队列、云端→云端 / 本地→本地走 /api/sync/copy。队列那两条链路带断点续传、
+   大小校验与失败重试，不能为了"统一"把它们并掉 —— 那是降级，不是简化。 */
+async function doDiffTransfer(fromWhich,toWhich,entries){
+  if(!entries.length){toast("没有选中可处理的项");return;}
+  const fromSide=diffSideOf(fromWhich),toSide=diffSideOf(toWhich);
+  const toLabel=sideLabel(toWhich);
+  let msg="";
+  try{
+    if(fromSide==="local"&&toSide==="cloud"){
+      const items=entries.map(e=>{
+        const item={localPath:entryAbs(e,fromWhich),remotePath:entryAbs(e,toWhich)};
+        // 目录交给服务端递归展开：本地的差异目录里有多少文件，只有服务端
+        // 扫一遍才知道，前端硬算会把深层文件漏掉。
+        if(e.isDir)item.isDir=true;
+        return item;
+      });
+      const res=await api("/api/upload/enqueue",{body:{items}});
+      msg=`已加入 ${res.added||0} 个上传任务`;
+    }else if(fromSide==="cloud"&&toSide==="local"){
+      const items=entries.map(e=>({
+        remotePath:entryAbs(e,fromWhich),
+        localPath:entryAbs(e,toWhich),
+        size:Number(e.size)||0,
+        isDir:!!e.isDir,
+      }));
+      const res=await api("/api/download/enqueue",{body:{items}});
+      msg=`已加入 ${res.added||0} 个下载任务`;
+    }else{
+      // 云端↔云端 走 OpenList 服务端复制；本地↔本地 走本地复制。
+      // **每一项都带上它在对侧的落点**：只给一个「目标目录」的话，服务端只能
+      // 按名字平铺进去，子目录里的差异文件会丢掉相对层级、全挤到目标根目录下
+      // —— 用户看到的「复制到了对比根目录，不是原路径目录」就是这个。
+      const res=await api("/api/sync/copy",{body:{side:fromSide,
+        items:entries.map(e=>({src:entryAbs(e,fromWhich),dst:entryAbs(e,toWhich)}))}});
+      msg=`已复制 ${res.copied||0} 项到${toLabel}`;
+      const tasks=(res.tasks||[]).length;
+      if(tasks)msg+=`，另有 ${tasks} 个云端后台任务在跑`;
+      if((res.failed||[]).length){
+        await askAlert("部分项目未能复制",
+          res.failed.slice(0,15).map(f=>f.path+"："+f.error).join("\n")
+          +(res.failed.length>15?`\n… 另有 ${res.failed.length-15} 项`:""));
+      }
+    }
+  }catch(e){askAlert("操作失败",e.message);return;}
+  toast(msg+"（进度见传输列表）");
+  dropDiffEntries(entries);
+}
+/* 「上传」= 把左侧的条目送到右侧。默认组合下就是本地 → 云端。 */
+async function diffUploadSelected(){
+  const picked=selectedDiffRows();
+  const entries=picked.local.concat(picked.mismatch);
+  if(!entries.length){toast("请先勾选"+sideLabel("left")+"独有或大小不一致的项");return;}
+  if(picked.mismatch.length){
+    const ok=await askConfirm(
+      `用${sideLabel("left")}覆盖${sideLabel("right")}？`,
+      `有 ${picked.mismatch.length} 个大小不一致的文件，将用${sideLabel("left")}的版本覆盖`
+      +`${sideLabel("right")}的版本（对方原文件会被替换）。`,
+      "覆盖");
+    if(!ok)return;
+  }
+  await doDiffTransfer("left","right",entries);
+}
+/* 「下载」= 把右侧的条目送到左侧。 */
+async function diffDownloadSelected(){
+  const picked=selectedDiffRows();
+  const entries=picked.cloud.concat(picked.mismatch);
+  if(!entries.length){toast("请先勾选"+sideLabel("right")+"独有或大小不一致的项");return;}
+  if(picked.mismatch.length){
+    const ok=await askConfirm(
+      `用${sideLabel("right")}覆盖${sideLabel("left")}？`,
+      `有 ${picked.mismatch.length} 个大小不一致的文件，将用${sideLabel("right")}的版本覆盖`
+      +`${sideLabel("left")}的版本（对方原文件会被替换）。`,
+      "覆盖");
+    if(!ok)return;
+  }
+  await doDiffTransfer("right","left",entries);
+}
+
+/* ---- 清除（不可逆）----
+   三个必须守住的点：
+   1. **一定要单独确认**，并把「删哪一侧、几项、多大、样例路径」摊开给用户看。
+      只有一句"确定删除吗"配一个红色按钮，用户是闭着眼点的。
+   2. **只清「多出来的」**。「大小不一致」两侧都有内容，把它当清除目标就是
+      在删用户可能还需要的那一份 —— 所以它压根不进可清除集合。
+   3. **按条目所在那一侧的类型分派**：清云端走 OpenList 删除，清本地走白名单
+      校验后的本地删除。两侧都可能是云端之后，"左边删本地、右边删云端"不再成立。 */
+async function doDiffClear(specs){
+  if(!specs.length){toast("没有可清除的项");return;}
+  const groups={local:[],cloud:[]};
+  specs.forEach(s=>{
+    groups[diffSideOf(s.which)].push({abs:entryAbs(s.entry,s.which),entry:s.entry});
+  });
+  const lines=[];
+  if(groups.local.length)
+    lines.push(`本地 ${groups.local.length} 项（${fmtSize(sumBytes(groups.local.map(x=>x.entry)))}）`);
+  if(groups.cloud.length)
+    lines.push(`云端 ${groups.cloud.length} 项（${fmtSize(sumBytes(groups.cloud.map(x=>x.entry)))}）`);
+  const all=groups.local.concat(groups.cloud).map(x=>x.abs);
+  const sample=all.slice(0,8).map(p=>"· "+p).join("\n");
+  const more=all.length-8;
+  const body=`将永久删除：${lines.join("，")}\n\n${sample}${more>0?`\n… 另有 ${more} 项`:""}\n\n`
+    +`此操作不可撤销，本应用不保留副本；云端文件是否进回收站取决于 OpenList 存储驱动的配置。`;
+  const ok=await askConfirm("永久删除这些多余文件？",body,"永久删除");
+  if(!ok)return;
+
+  const failed=[];
+  let removedLocal=0,removedCloud=0;
+  try{
+    if(groups.local.length){
+      const r=await api("/api/local/remove",{body:{paths:groups.local.map(x=>x.abs)}});
+      removedLocal=r.removed||0;
+      (r.failed||[]).forEach(f=>failed.push(f.path+"："+f.error));
+    }
+    if(groups.cloud.length){
+      const r=await api("/api/cloud/remove",{body:{paths:groups.cloud.map(x=>x.abs)}});
+      removedCloud=r.removed||0;
+      (r.failed||[]).forEach(f=>failed.push(f.path+"："+f.error));
+    }
+  }catch(e){askAlert("清除失败",e.message);return;}
+
+  toast(`已删除：本地 ${removedLocal} 项、云端 ${removedCloud} 项`);
+  if(failed.length){
+    await askAlert("部分项目未能删除",
+      failed.slice(0,15).join("\n")+(failed.length>15?`\n… 另有 ${failed.length-15} 项`:""));
+  }
+  dropDiffEntries(specs.map(s=>s.entry));
+}
+async function diffClearSelected(){
+  const picked=selectedDiffRows();
+  await doDiffClear(picked.local.map(e=>({which:"left",entry:e}))
+    .concat(picked.cloud.map(e=>({which:"right",entry:e}))));
+}
+
+/* 操作成功后把已处理的差异行从结果里摘掉并同步统计 ——
+   否则用户刚传完，那几行还挂着「仅本地」，看着像根本没生效。
+   按 `path` 摘：path 在三组之间唯一，而泛化到两侧来源之后，调用点
+   已经不必（也无从）知道条目原本属于哪一组。 */
+function dropDiffEntries(entries){
+  const drop=new Set(entries.map(e=>e.path));
+  if(!drop.size)return;
+  const d=diffState.data;if(!d)return;
+  ["local","cloud","mismatch"].forEach(kind=>{
+    diffEntries(kind).forEach(e=>{
+      if(drop.has(e.path))diffState.sel.delete(diffKey(kind,e.path));
+    });
+  });
+  const r=d.result||{};
+  const keep=kind=>diffEntries(kind).filter(e=>!drop.has(e.path));
+  r.localExtra=keep("local");
+  r.cloudExtra=keep("cloud");
+  r.mismatch=keep("mismatch");
+  r.localExtraCount=r.localExtra.length;
+  r.cloudExtraCount=r.cloudExtra.length;
+  r.mismatchCount=r.mismatch.length;
+  renderDiff();
+}
+
+/* ================= 目录绑定 ================= */
+const bindState={bindings:[],expanded:new Set(),selected:{},viewMode:{},treeExpanded:{},
+  // 正在提交上传的绑定 id：按钮禁用与「再点一次」的拦截都看它。
+  submitting:new Set(),
+  // 提交进度快照（bid -> 后端 submit 视图）。卡片重绘后靠它恢复状态条 ——
+  // 后端才是进度的唯一事实来源，前端只负责画。
+  subState:{}};
+
+// 两个轮询器的定时器句柄：
+//   submitTimers   —— 提交阶段（500ms，只读后端内存，不打云端）
+//   progressTimers —— 云端复制阶段（2s，问 OpenList 任务列表）
+const submitTimers={};
+const BIND_ST_TEXT={missing:"缺失",mismatch:"不一致",uploaded:"已存在",queued:"排队中",uploading:"上传中",failed:"失败",done:"已完成"};
+
+async function loadBindings(){
+  try{const d=await api("/api/bindings");bindState.bindings=d.bindings;
+    syncSubmitState();
+    renderBindings();}
+  catch(e){$("bindList").innerHTML='<div class="empty">'+esc(e.message)+'</div>';}
+}
+
+/** 用后端的 submitting 校准本地状态。
+ *
+ * 刷新页面、从别的标签页切回来时，本地那个 Set 是空的 —— 若不以后端为准，
+ * 按钮就又能点了，「提交进行中禁用重复点击」一刷新就失效。
+ */
+function syncSubmitState(){
+  (bindState.bindings||[]).forEach(b=>{
+    if(b.submitting){
+      bindState.submitting.add(b.id);
+      if(!bindState.subState[b.id]){
+        bindState.subState[b.id]={active:true,phase:"prepare",done:0,total:0,
+          files:0,targets:0,submitted:0,failed:0,percent:0,message:"",
+          startedAt:0,finishedAt:0,elapsed:0};
+      }
+      if(!submitTimers[b.id])startSubmitPoll(b.id);
+    }else{
+      bindState.submitting.delete(b.id);
+      const st=bindState.subState[b.id];
+      if(st&&st.active){st.active=false;stopSubmitPoll(b.id);}
+    }
+  });
+}
+
+function renderBindings(){
+  const box=$("bindList");
+  if(!bindState.bindings.length){
+    box.innerHTML='<div class="empty">还没有同步，点「新建同步」创建本地 → 云端的备份关系</div>';
+    return;
+  }
+  // 轮询重建时保留已展开卡片的旧内容与滚动位置，避免闪烁和回弹到顶
+  const oldInfo={};
+  [...box.querySelectorAll(".bcard")].forEach(card=>{
+    if(!card.dataset.bid)return;
+    const body=card.querySelector(".bcard-body");
+    const fl=body?body.querySelector(".bc-files"):null;
+    oldInfo[card.dataset.bid]={body:body,scrollTop:fl?fl.scrollTop:0};
+  });
+  box.innerHTML="";
+  bindState.bindings.forEach(b=>box.appendChild(renderBindingCard(b,oldInfo[b.id])));
+}
+
+function renderBindingCard(b,oldInfo){
+  const card=document.createElement("div");card.className="bcard";card.dataset.bid=b.id;
+  const isOpen=bindState.expanded.has(b.id);
+
+  // 头部
+  const head=document.createElement("div");head.className="bcard-head";
+  const main=document.createElement("div");main.className="bc-main";
+
+  // 名称 + 扫描状态
+  const nameRow=document.createElement("div");nameRow.className="bc-name";
+  let scanLabel={idle:"未扫描",scanning:"扫描中…",done:"已扫描",error:"扫描失败"}[b.scanStatus]||esc(b.scanStatus);
+  if(b.scanStatus==="scanning"&&b.scanProgress&&b.scanProgress.phase==="queued")scanLabel="排队中";
+  nameRow.innerHTML=esc(b.name)+'<span class="badge-scan '+esc(b.scanStatus)+'">'+scanLabel+'</span>';
+  main.appendChild(nameRow);
+
+  // 扫描进度条（扫描中时显示）
+  if(b.scanStatus==="scanning"&&b.scanProgress){
+    const prog=document.createElement("div");prog.className="bc-scanprog";
+    if(b.scanProgress.phase==="queued"){
+      prog.innerHTML='<div class="bc-progtext">等待扫描槽位（全局并发限制）…</div>';
+    }else{
+      const phaseText={source:"扫描源目录",target:"扫描目标目录",compare:"对比文件",starting:"准备中",done:"完成"}[b.scanProgress.phase]||esc(b.scanProgress.phase);
+      const pct=b.totalLocalFiles?Math.min(100,Math.round(b.scanProgress.scanned/b.totalLocalFiles*100)):0;
+      prog.innerHTML='<div class="bc-progbar"><div class="bc-progfill" style="width:'+pct+'%"></div></div>'+
+        '<div class="bc-progtext">'+phaseText+(b.scanProgress.scanned?' · 已扫描 '+b.scanProgress.scanned+' 个':'')+
+        (b.scanProgress.current?' · '+esc(b.scanProgress.current):'')+'</div>';
+    }
+    main.appendChild(prog);
+  }
+
+  // 路径：本地 → 云端目标
+  const pathRow=document.createElement("div");pathRow.className="bc-path";
+  pathRow.innerHTML='<span class="bf-tgt" style="background:#eef5ff">'+esc(b.localPath)+'</span><span class="arrow">→</span>';
+  b.cloudTargets.forEach(t=>{
+    const tag=document.createElement("span");
+    tag.className="bc-tgt"+(t.enabled?"":" off");
+    tag.textContent=(t.enabled?"":"")+t.path;
+    tag.title=t.enabled?t.path:"已禁用";
+    pathRow.appendChild(tag);
+  });
+  main.appendChild(pathRow);
+
+  // 统计
+  const meta=document.createElement("div");meta.className="bc-meta";
+  const missCls=b.missingCount>0?"bc-misscount":"bc-misscount zero";
+  let metaHtml='<span class="'+missCls+'">待处理 '+b.missingCount+'</span>'+
+    '<span>本地文件 '+b.totalLocalFiles+'</span>';
+  // 扫描完成后显示详细统计
+  if(b.scanStatus==="done"&&b.scanStats){
+    const s=b.scanStats;
+    metaHtml+='<span style="color:var(--fn-red)">缺失 '+(s.missing||0)+'</span>'+
+      '<span style="color:#e6a23c">不一致 '+(s.mismatch||0)+'</span>'+
+      '<span style="color:var(--fn-green)">已同步 '+(s.synced||0)+'</span>';
+    if(s.inflight)metaHtml+='<span style="color:#409eff">传输中 '+s.inflight+'</span>';
+    if(s.failed)metaHtml+='<span style="color:var(--fn-red)">失败 '+s.failed+'</span>';
+  }
+  metaHtml+=(b.lastScannedAt?'<span>扫描于 '+fmtTime(b.lastScannedAt)+'</span>':'<span>尚未扫描</span>');
+  if(b.scanError)metaHtml+='<span style="color:var(--fn-red)">'+esc(b.scanError)+'</span>';
+  meta.innerHTML=metaHtml;
+  main.appendChild(meta);
+  head.appendChild(main);
+
+  // 操作按钮
+  const ops=document.createElement("div");ops.className="bc-ops";
+  const autoWrap=document.createElement("span");autoWrap.style.cssText="display:inline-flex;align-items:center;gap:4px;margin-right:4px;font-size:12px;color:var(--fn-text2)";
+  autoWrap.textContent="自动";
+  const autoLabel=document.createElement("label");autoLabel.className="switch";autoLabel.title="自动上传";
+  autoLabel.innerHTML='<input type="checkbox" '+(b.autoUpload?"checked":"")+'><span class="sl"></span>';
+  autoLabel.querySelector("input").onchange=async ev=>{
+    try{await api("/api/bindings/update",{body:{id:b.id,autoUpload:ev.target.checked}});
+      toast(ev.target.checked?"已开启自动上传":"已关闭自动上传");}
+    catch(e){toast(e.message);ev.target.checked=!ev.target.checked;}
+  };
+  autoWrap.appendChild(autoLabel);
+  ops.appendChild(autoWrap);
+
+  const busy=bindState.submitting.has(b.id);
+  const mkOp=(txt,fn,blockWhileBusy)=>{const btn=document.createElement("button");btn.className="linkbtn";btn.textContent=txt;
+    // 提交进行中禁用「扫描」：扫描会重写各目标的状态，与正在提交的那批文件
+    // 抢同一份数据 —— 属于典型误操作。
+    if(blockWhileBusy&&busy){btn.disabled=true;btn.title="正在提交上传，请稍候";}
+    btn.onclick=fn;return btn;};
+  ops.appendChild(mkOp(isOpen?"收起":"文件",()=>toggleBinding(b.id)));
+  ops.appendChild(mkOp("扫描",()=>doScan(b.id),true));
+  ops.appendChild(mkOp("编辑",()=>openBindForm(b)));
+  const delBtn=mkOp("删除",async()=>{
+    const ok=await askConfirm("删除同步","确定删除同步「"+b.name+"」？已上传的文件不受影响。","删除");
+    if(ok){await api("/api/bindings/delete",{body:{id:b.id}});loadBindings();}
+  });
+  delBtn.classList.add("red");ops.appendChild(delBtn);
+  head.appendChild(ops);
+  card.appendChild(head);
+
+  // 展开区域：首次展开显示 loading；轮询重建时保留旧内容并静默刷新（不闪烁、不回弹）
+  const body=document.createElement("div");body.className="bcard-body"+(isOpen?" open":"");
+  card.appendChild(body);
+  if(isOpen){
+    if(oldInfo){body.innerHTML=oldInfo.body.innerHTML;loadBindingDetailSilent(b.id,body,oldInfo.scrollTop);}
+    else loadBindingDetail(b.id,body);
+  }
+
+  return card;
+}
+
+function toggleBinding(bid){
+  if(bindState.expanded.has(bid))bindState.expanded.delete(bid);
+  else bindState.expanded.add(bid);
+  renderBindings();
+}
+
+async function loadBindingDetail(bid,bodyEl){
+  bodyEl.innerHTML='<div class="loading"><span class="spin"></span> 加载文件…</div>';
+  try{
+    const d=await api("/api/bindings/detail?id="+encodeURIComponent(bid));
+    renderBindingDetail(bid,d.binding,bodyEl);
+  }catch(e){bodyEl.innerHTML='<div class="empty">'+esc(e.message)+'</div>';}
+}
+/* 轮询时静默刷新：不显示 loading，失败保留旧内容；保留 .bc-files 的滚动位置 */
+async function loadBindingDetailSilent(bid,bodyEl,preservedScrollTop){
+  try{
+    const d=await api("/api/bindings/detail?id="+encodeURIComponent(bid));
+    if(!bodyEl.isConnected)return;
+    const saved=typeof preservedScrollTop==="number"?preservedScrollTop:0;
+    renderBindingDetail(bid,d.binding,bodyEl);
+    const newFl=bodyEl.querySelector(".bc-files");
+    if(newFl)newFl.scrollTop=saved;
+  }catch(e){/* 静默失败，保留旧内容 */}
+}
+
+const BIND_PAGE_SIZE=200;
+
+const PENDING_SET=new Set(["missing","mismatch","failed"]);
+const isPendingFile=f=>Object.values(f.targets||{}).some(s=>PENDING_SET.has(s.status));
+
+function renderBindingDetail(bid,b,bodyEl){
+  bodyEl.innerHTML="";  // 关键：先清空，否则轮询刷新会在旧列表后再追加一组
+  // 提交状态条排在最上面：用户点完「一键上传」最想知道的就是「它到底在不在跑」。
+  const sub=bindState.subState[bid];
+  // 但不是永久保留 —— 提交结束 10 分钟后就该让位，免得用户把上一条结果
+  // 误当成「现在正在发生的事」。
+  const subFresh=sub&&(sub.active||!sub.finishedAt||
+    (Math.floor(Date.now()/1000)-Number(sub.finishedAt))<600);
+  if(subFresh)bodyEl.appendChild(buildSubBar(bid,sub));
+  const files=b.files||[];
+  const sel=bindState.selected[bid]||(bindState.selected[bid]=new Set());
+  const mode=bindState.viewMode[bid]||"tree";
+
+  // 操作栏
+  const bar=document.createElement("div");bar.className="bc-files-bar";
+  const pendingFiles=files.filter(isPendingFile);
+  // files 里只装「待处理/进行中」的文件（已同步的不进列表），
+  // 所以总数必须用服务端给的 totalLocalFiles：否则源目录明明有 300 个文件，
+  // 界面却写「共 3 个文件」，看着像扫描漏了一大片。
+  const totalLocal=Number(b.totalLocalFiles)||files.length;
+  bar.innerHTML='<span class="hint">本地共 '+totalLocal+' 个文件，'+pendingFiles.length+' 个待处理</span>';
+  // 视图切换
+  const seg=document.createElement("div");seg.className="seg";
+  seg.innerHTML='<button type="button" data-v="flat">文件视图</button><button type="button" data-v="tree">文件夹视图</button>';
+  seg.querySelectorAll("button").forEach(btn=>{
+    btn.classList.toggle("active",btn.dataset.v===mode);
+    btn.onclick=()=>{
+      if(bindState.viewMode[bid]===btn.dataset.v)return;
+      bindState.viewMode[bid]=btn.dataset.v;
+      renderBindingDetail(bid,b,bodyEl);
+    };
+  });
+  bar.appendChild(seg);
+  const busy=bindState.submitting.has(bid);
+  const mkBarBtn=(txt,fn,primary)=>{const btn=document.createElement("button");
+    btn.className=primary?"btn small":"linkbtn";btn.textContent=txt;
+    // 提交进行中一律禁用：再点一次没有意义（后端也会拒），
+    // 至少别让按钮看起来还能点。
+    if(busy){btn.disabled=true;btn.title="正在提交上传，请稍候";}
+    btn.onclick=fn;return btn;};
+  bar.appendChild(mkBarBtn("上传选中",async()=>{
+    if(!sel.size){toast("请先勾选文件");return;}
+    await doUpload(bid,[...sel],null);
+  }));
+  bar.appendChild(mkBarBtn("全部上传",async()=>{
+    if(!pendingFiles.length){toast("没有待处理文件");return;}
+    await doUpload(bid,null,null,true);
+  },true));
+  bodyEl.appendChild(bar);
+
+  // 列表
+  const fl=document.createElement("div");fl.className="bc-files";
+  if(!files.length){
+    fl.innerHTML='<div class="empty">'+(b.scanStatus==="done"?"本地与云端已完全同步，没有待处理文件":"尚未扫描，点「扫描」检测缺失文件")+'</div>';
+  }else if(mode==="tree"){
+    renderTreeView(fl,files,b.cloudTargets,bid,sel);
+  }else{
+    const pg={files:files,targets:b.cloudTargets,rendered:0};
+    fl._pg=pg;
+    fl.onscroll=()=>{
+      if(fl.scrollHeight-fl.scrollTop-fl.clientHeight<120&&pg.rendered<pg.files.length){
+        appendBindingRows(fl,pg,sel,bid);
+      }
+    };
+    appendBindingRows(fl,pg,sel,bid);
+  }
+  bodyEl.appendChild(fl);
+}
+
+function buildFileRow(f,targets,sel,bid){
+  const row=document.createElement("div");row.className="bfrow";
+  const chk=document.createElement("input");chk.type="checkbox";
+  chk.checked=sel.has(f.relPath);
+  chk.onclick=()=>{chk.checked?sel.add(f.relPath):sel.delete(f.relPath);};
+  const path=document.createElement("div");path.className="bf-path";
+  path.textContent=f.relPath;path.title=f.relPath;
+  const size=document.createElement("div");size.className="bf-size";size.textContent=fmtSize(f.size);
+  const tgts=document.createElement("div");tgts.className="bf-tgts";
+  Object.entries(f.targets||{}).forEach(([tid,s])=>{
+    const tag=document.createElement("span");
+    tag.className="bf-tgt "+s.status;
+    const target=targets.find(t=>t.id===tid);
+    const shortPath=target?target.path.split("/").pop()||target.path:tid;
+    tag.textContent=shortPath+"·"+(BIND_ST_TEXT[s.status]||s.status);
+    tag.title=(target?target.path+" - ":"")+(s.error||BIND_ST_TEXT[s.status]||s.status);
+    tgts.appendChild(tag);
+  });
+  if(isPendingFile(f)){
+    const upBtn=document.createElement("button");upBtn.className="linkbtn";
+    upBtn.style.fontSize="11px";
+    if(bindState.submitting.has(bid)){
+      upBtn.disabled=true;upBtn.textContent="提交中";upBtn.title="正在提交上传，请稍候";
+    }else{
+      upBtn.textContent="上传";
+    }
+    upBtn.onclick=()=>doUpload(bid,[f.relPath],null);
+    tgts.appendChild(upBtn);
+  }
+  row.append(chk,path,size,tgts);
+  return row;
+}
+
+function appendBindingRows(fl,pg,sel,bid){
+  const start=pg.rendered;
+  const end=Math.min(start+BIND_PAGE_SIZE,pg.files.length);
+  const frag=document.createDocumentFragment();
+  for(let i=start;i<end;i++){
+    frag.appendChild(buildFileRow(pg.files[i],pg.targets,sel,bid));
+  }
+  pg.rendered=end;
+  fl.appendChild(frag);
+}
+
+/* ===== 文件夹视图：按目录树分组 ===== */
+function buildFolderTree(files){
+  const root={name:"",path:"",children:{},files:[],pendingCount:0};
+  files.forEach(f=>{
+    const parts=(f.relPath||"").split("/").filter(Boolean);
+    let node=root;
+    for(let i=0;i<parts.length-1;i++){
+      const seg=parts[i];
+      const p=parts.slice(0,i+1).join("/");
+      if(!node.children[seg])node.children[seg]={name:seg,path:p,children:{},files:[],pendingCount:0};
+      node=node.children[seg];
+    }
+    node.files.push(f);
+  });
+  (function calc(n){
+    let cnt=n.files.filter(isPendingFile).length;
+    Object.values(n.children).forEach(c=>{cnt+=calc(c);});
+    n.pendingCount=cnt;
+    return cnt;
+  })(root);
+  return root;
+}
+
+function renderTreeView(fl,files,targets,bid,sel){
+  const root=buildFolderTree(files);
+  const expanded=bindState.treeExpanded[bid]||(bindState.treeExpanded[bid]=new Set());
+  const saved=fl.scrollTop;
+  fl.innerHTML="";
+  const frag=document.createDocumentFragment();
+  root.files.forEach(f=>frag.appendChild(buildFileRow(f,targets,sel,bid)));
+  Object.values(root.children).sort((a,b)=>a.name.localeCompare(b.name)).forEach(c=>{
+    frag.appendChild(buildFolderNode(c,0,targets,bid,sel,expanded,files,targets));
+  });
+  fl.appendChild(frag);
+  fl.scrollTop=saved;
+}
+
+function buildFolderNode(node,depth,targets,bid,sel,expanded,allFiles,allTargets){
+  const open=expanded.has(node.path);
+  const out=document.createDocumentFragment();
+  const row=document.createElement("div");row.className="bfrow bf-folder";
+  row.style.paddingLeft=(10+depth*22)+"px";
+  const arrow=document.createElement("span");arrow.className="bf-arrow";
+  arrow.textContent=open?"▾":"▸";
+  const name=document.createElement("div");name.className="bf-path";
+  name.textContent="📁 "+node.name;name.title=node.path;
+  row.append(arrow,name);
+  // 未上传角标：0 显示完成勾，>0 显示橙色数字
+  if(node.pendingCount>0){
+    const badge=document.createElement("span");badge.className="bf-badge";
+    badge.textContent=node.pendingCount;row.appendChild(badge);
+  }else{
+    const done=document.createElement("span");done.className="bf-badge done";done.textContent="✓";
+    row.appendChild(done);
+  }
+  // 一键上传（有待处理文件时才出现）
+  if(node.pendingCount>0){
+    const upBtn=document.createElement("button");upBtn.className="linkbtn";
+    upBtn.style.fontSize="11px";
+    if(bindState.submitting.has(bid)){
+      upBtn.disabled=true;
+      upBtn.innerHTML='<span class="spin" style="width:10px;height:10px;border-width:1.5px"></span> 提交中';
+      upBtn.title="正在提交上传，请稍候";
+    }else{
+      upBtn.textContent="一键上传";
+    }
+    upBtn.onclick=ev=>{ev.stopPropagation();uploadFolder(bid,node);};
+    row.appendChild(upBtn);
+  }
+  // 构建子节点容器的函数
+  const buildChildren=()=>{
+    const container=document.createElement("div");
+    container.className="bf-children";
+    // 子文件夹（排在最上面）
+    Object.values(node.children).sort((a,b)=>a.name.localeCompare(b.name)).forEach(c=>{
+      container.appendChild(buildFolderNode(c,depth+1,targets,bid,sel,expanded,allFiles,allTargets));
+    });
+    // 直接文件（排在子文件夹下面）
+    node.files.forEach(f=>{
+      const fr=buildFileRow(f,targets,sel,bid);
+      fr.style.paddingLeft=(10+(depth+1)*22)+"px";
+      container.appendChild(fr);
+    });
+    return container;
+  };
+  // 展开/折叠：用容器包裹子节点，折叠时直接移除整个容器
+  row.onclick=()=>{
+    const isOpen=expanded.has(node.path);
+    const willOpen=!isOpen;
+    if(willOpen)expanded.add(node.path);else expanded.delete(node.path);
+    arrow.textContent=willOpen?"▾":"▸";
+    // 移除旧的子容器（如果存在）
+    const oldContainer=row.nextSibling;
+    if(oldContainer&&oldContainer.classList&&oldContainer.classList.contains("bf-children")){
+      oldContainer.remove();
+    }
+    if(willOpen){
+      row.after(buildChildren());
+    }
+  };
+  out.appendChild(row);
+  // 初始展开状态：创建子容器
+  if(open){
+    out.appendChild(buildChildren());
+  }
+  return out;
+}
+
+function collectPendingPaths(node,out){
+  node.files.forEach(f=>{if(isPendingFile(f))out.push(f.relPath);});
+  Object.values(node.children).forEach(c=>collectPendingPaths(c,out));
+}
+
+async function uploadFolder(bid,node){
+  const paths=[];collectPendingPaths(node,paths);
+  if(!paths.length){toast("该文件夹没有待上传文件");return;}
+  await doUpload(bid,paths,null);
+}
+
+async function doScan(bid){
+  try{await api("/api/bindings/scan",{body:{id:bid}});toast("已开始扫描");
+    // 轮询扫描状态
+    let tries=0;
+    const iv=setInterval(async()=>{
+      tries++;
+      await loadBindings();
+      const b=bindState.bindings.find(x=>x.id===bid);
+      if(!b||b.scanStatus!=="scanning"||tries>120){clearInterval(iv);
+        if(b&&b.autoUpload&&b.scanStatus==="done")toast("扫描完成，已自动上传");
+        else if(b)toast("扫描完成");
+      }
+    },1500);
+  }catch(e){toast(e.message);}
+}
+
+/* ============ 一键上传：状态条、进度轮询、防重复点击 ============ */
+
+// 后端 phase → 人话，两边一一对应，前端不做猜测。
+const SUBMIT_PHASE_TEXT={
+  prepare:"正在收集待上传文件…",
+  submit:"正在提交到云端…",
+  finalize:"正在保存状态…",
+  cloud:"云端复制中…",
+  done:"提交完成",
+  error:"提交失败"
+};
+
+async function doUpload(bid,relPaths,targetIds,all){
+  // 防重复点击的第二道闸门（第一道是按钮禁用）：键盘回车、连点、脚本触发
+  // 都可能绕过 UI。真正说了算的是后端的幂等闸门，这里只是少发一次无用请求。
+  if(bindState.submitting.has(bid)){toast("正在提交上传，请稍候…");return;}
+  bindState.submitting.add(bid);
+  // 立刻给出反馈：状态条先出现、按钮先转圈 —— 此刻请求还没发出去。
+  // 用户看到"有反应"才会停止重复点击，这是本次改动的核心。
+  setSubState(bid,{active:true,phase:"prepare",done:0,total:0,files:0,targets:0,
+    submitted:0,failed:0,percent:0,message:"",cloudName:"",
+    startedAt:Math.floor(Date.now()/1000),finishedAt:0,elapsed:0});
+  addSubBarToCard(bid);
+  refreshBindingActions(bid);
+  startSubmitPoll(bid);
+
+  let submitted=0,ok=false;
+  try{
+    const body={id:bid};
+    if(all)body.all=true;
+    else body.relPaths=relPaths;
+    if(targetIds)body.targetIds=targetIds;
+    const d=await api("/api/bindings/upload",{body});
+    ok=true;
+    submitted=Number(d.queued)||0;
+    if(d.submit)setSubState(bid,d.submit);
+    if(submitted>0)toast("已提交 "+submitted+" 个文件，云端复制中");
+    else toast("没有需要上传的文件");
+    if(relPaths)relPaths.forEach(p=>bindState.selected[bid]&&bindState.selected[bid].delete(p));
+  }catch(e){
+    toast(e.message);
+    setSubState(bid,{active:false,phase:"error",percent:0,message:e.message});
+  }finally{
+    bindState.submitting.delete(bid);
+    stopSubmitPoll(bid);
+    // 轮询未必抓到后端最后那个状态，这里补一次，否则状态条会永远停在
+    // 「第 29/30 个目录」这种数字上。
+    try{
+      const d=await api("/api/bindings/progress?id="+encodeURIComponent(bid)+"&submit=1");
+      if(d.progress&&d.progress.submit)setSubState(bid,d.progress.submit);
+    }catch(e){}
+    refreshBindingActions(bid);
+    // 重新渲染列表；展开的卡片会自动重新拉取详情
+    await loadBindings();
+    // 立刻刷一次传输列表：绑定任务是 OpenList 服务端复制，进度只能在传输列表看，
+    // 不刷的话用户切过去看到的还是上一轮的旧列表，像"点了什么都没发生"。
+    loadTasks();
+    if(ok&&submitted>0){
+      // copy 是异步的，15 秒后自动扫描一次刷新状态；同时盯着云端复制进度。
+      setTimeout(async()=>{
+        try{await api("/api/bindings/scan",{body:{id:bid}});}catch(e){}
+      },15000);
+      startProgressPoll(bid);
+    }
+  }
+}
+
+/* ---- 提交状态条 ---- */
+
+function setSubState(bid,st){
+  bindState.subState[bid]=Object.assign({},bindState.subState[bid]||{},st||{});
+  paintSubBarDom(bid);
+}
+
+/** 卡片已展开时把状态条就地插进去（不重绘整卡，否则会把展开的目录树收起）。 */
+function addSubBarToCard(bid){
+  const card=document.querySelector('.bcard[data-bid="'+bid+'"]');
+  if(!card)return;
+  const body=card.querySelector(".bcard-body");
+  if(!body||!body.querySelector(".bc-files-bar"))return;   // 详情还没渲染出来
+  if(body.querySelector(".subbar"))return;                 // 已经有了
+  body.insertBefore(buildSubBar(bid,bindState.subState[bid]),body.firstChild);
+}
+
+function buildSubBar(bid,st){
+  const wrap=document.createElement("div");
+  wrap.className="subbar";
+  wrap.dataset.subbid=bid;
+  wrap.innerHTML='<span class="spin"></span><span class="subtxt"></span>'+
+                 '<div class="prog"><i></i></div><span class="submeta"></span>';
+  paintSubBar(wrap,st);
+  return wrap;
+}
+
+/** 就地更新已存在于 DOM 里的状态条。刻意不重绘整卡：那会打断用户滚动。 */
+function paintSubBarDom(bid){
+  const wrap=document.querySelector('.bcard[data-bid="'+bid+'"] .subbar');
+  if(wrap)paintSubBar(wrap,bindState.subState[bid]);
+}
+
+function paintSubBar(wrap,st){
+  st=st||{};
+  const active=!!st.active;
+  const phase=st.phase||"";
+  const total=Number(st.total)||0;
+  const done=Number(st.done)||0;
+  const submitted=Number(st.submitted)||0;
+  const pct=Math.max(0,Math.min(100,Number(st.percent)||0));
+
+  let text;
+  if(active){
+    if(phase==="submit"&&total>0){
+      text="正在提交到云端（"+Math.min(done+1,total)+"/"+total+" 个目录）…";
+    }else if(phase==="cloud"){
+      text="云端复制中"+(st.cloudName?"："+st.cloudName:"")+" "+pct+"%";
+    }else{
+      text=SUBMIT_PHASE_TEXT[phase]||"正在提交…";
+    }
+  }else if(phase==="error"){
+    text="提交失败："+(st.message||"请查看日志");
+  }else if(submitted>0){
+    text="已提交 "+submitted+" 个文件";
+  }else{
+    text=st.message||"没有需要上传的文件";
+  }
+
+  const spin=wrap.querySelector(".spin");
+  if(spin)spin.style.display=active?"":"none";
+  wrap.querySelector(".subtxt").textContent=text;
+  const bar=wrap.querySelector(".prog>i");
+  // prepare 阶段还没有分母，进度条先留空（转圈本身已经说明"在跑"）；
+  // 云端复制阶段有真实百分比，照常画。
+  if(bar)bar.style.width=((active&&phase!=="cloud"&&total===0)?0:pct)+"%";
+
+  let meta="";
+  if(active&&phase==="submit"&&total>0)meta=done+"/"+total+" 个目录";
+  else if(!active&&Number(st.elapsed)>0)meta="耗时 "+st.elapsed+" 秒";
+  if(!active&&Number(st.failed)>0)
+    meta=(meta?meta+" · ":"")+st.failed+" 个目录失败";
+  wrap.querySelector(".submeta").textContent=meta;
+
+  wrap.classList.toggle("finished",!active&&phase!=="error");
+  wrap.classList.toggle("failed",!active&&phase==="error");
+}
+
+/** 提交一开始就把该绑定的上传入口全部改成禁用 / loading。
+ *
+ * 就地改 DOM 而**不**重绘整卡：重绘会把用户展开的目录树收起、滚动位置
+ * 打回顶部 —— 那正是「点一下界面乱跳」的来源。
+ */
+function refreshBindingActions(bid){
+  const card=document.querySelector('.bcard[data-bid="'+bid+'"]');
+  if(!card)return;
+  const busy=bindState.submitting.has(bid);
+  const BLOCKED=["一键上传","上传","上传选中","全部上传","扫描"];
+  card.querySelectorAll("button").forEach(btn=>{
+    const label=(btn.dataset.subLabel||btn.textContent||"").trim();
+    if(busy&&BLOCKED.indexOf(label)>=0){
+      btn.dataset.subLabel=label;     // 记下原文案，结束后还原
+      btn.disabled=true;
+      btn.title="正在提交上传，请稍候";
+      if(label==="一键上传"){
+        btn.innerHTML='<span class="spin" style="width:10px;height:10px;border-width:1.5px"></span> 提交中';
+      }else{
+        btn.textContent=(label==="扫描")?"提交中…":"提交中";
+      }
+    }else if(!busy&&btn.dataset.subLabel){
+      btn.disabled=false;
+      btn.textContent=btn.dataset.subLabel;
+      btn.removeAttribute("title");
+      delete btn.dataset.subLabel;
+    }
+  });
+}
+
+/* ---- 提交进度轮询（轻量：只读后端内存，不打云端） ---- */
+
+function startSubmitPoll(bid){
+  stopSubmitPoll(bid);
+  let idle=0;
+  const tick=async()=>{
+    try{
+      const d=await api("/api/bindings/progress?id="+encodeURIComponent(bid)+"&submit=1");
+      const st=d.progress&&d.progress.submit;
+      if(!st){idle++;return;}
+      setSubState(bid,st);
+      if(st.active)idle=0;
+      else if(++idle>=2)stopSubmitPoll(bid);   // 连续两次已收尾 → 停
+    }catch(e){
+      // 进度查不到不该打扰用户：提交本身还在跑，主请求返回时会给出结论。
+      if(++idle>=4)stopSubmitPoll(bid);
+    }
+  };
+  submitTimers[bid]=setInterval(tick,500);
+  tick();
+}
+
+function stopSubmitPoll(bid){
+  if(submitTimers[bid]){clearInterval(submitTimers[bid]);delete submitTimers[bid];}
+}
+
+/* ---- 云端复制进度轮询（提交完成之后） ---- */
+
+const progressTimers={};
+function startProgressPoll(bid){
+  stopProgressPoll(bid);
+  let ticks=0;
+  progressTimers[bid]=setInterval(async()=>{
+    ticks++;
+    try{
+      const d=await api("/api/bindings/progress?id="+encodeURIComponent(bid));
+      const p=d.progress;
+      if(p&&p.hasActive){
+        const running=p.running[0];
+        if(running){
+          // 原来是每 2 秒弹一次 toast（"复制中：xxx 45%"）—— 连续几十条提示
+          // 比没有提示更烦。改成把云端复制进度画进同一条状态条。
+          setSubState(bid,{active:true,phase:"cloud",
+            percent:Number(running.progress)||0,
+            cloudName:running.name||""});
+        }
+      }else if(ticks>3){
+        // 连续几次无任务，停止轮询
+        stopProgressPoll(bid);
+        await loadBindings();
+      }
+    }catch(e){}
+    // 大文件夹的复制可能跑很久；原来 60 秒就放弃，用户后半程再也看不到进度。
+    if(ticks>150)stopProgressPoll(bid);
+  },2000);
+}
+function stopProgressPoll(bid){
+  if(progressTimers[bid]){clearInterval(progressTimers[bid]);delete progressTimers[bid];}
+}
+
+$("btnNewBinding").onclick=()=>openBindForm(null);
+$("btnScanAll").onclick=async()=>{
+  try{const d=await api("/api/bindings/scan-all",{body:{}});
+    toast("已开始扫描 "+d.started+" 个同步");
+    setTimeout(loadBindings,2000);
+  }catch(e){toast(e.message);}
+};
+
+/* ---- 绑定表单 ---- */
+let editingBindingId=null;
+function openBindForm(b){
+  editingBindingId=b?b.id:null;
+  $("bdTitle").textContent=b?"编辑同步":"新建同步";
+  $("bdError").textContent="";
+  if(b){
+    $("bdName").value=b.name;
+    $("bdLocal").value=b.localPath;
+    $("bdAuto").checked=b.autoUpload;
+    $("bdExcl").value=(b.excludeNames||[]).join(", ");
+    $("bdMode").value=b.syncMode||"add";
+    $("bdConflict").value=b.conflictPolicy||"skip";
+    $("bdSnapshot").checked=!!b.sourceSnapshot;
+    renderTargetEditors(b.cloudTargets.map(t=>({path:t.path,enabled:t.enabled,id:t.id})));
+  }else{
+    $("bdName").value="";
+    $("bdLocal").value=state.config.localSourceRoot||"";
+    $("bdAuto").checked=false;
+    $("bdExcl").value=(state.config.excludeNames||[]).join(", ");
+    $("bdMode").value="add";
+    $("bdConflict").value="overwrite";
+    $("bdSnapshot").checked=false;
+    renderTargetEditors([{path:state.config.cloudRoot||"/",enabled:true}]);
+  }
+  $("bindOverlay").classList.remove("hidden");
+}
+
+function renderTargetEditors(targets){
+  const box=$("bdTargets");box.innerHTML="";
+  targets.forEach(t=>box.appendChild(makeTargetEditor(t)));
+}
+
+function makeTargetEditor(t){
+  t=t||{path:"",enabled:true};
+  const el=document.createElement("div");el.className="tgt-editor";
+  const row=document.createElement("div");row.className="te-row";
+  const inp=document.createElement("input");inp.type="text";inp.placeholder="云端目录，如 /aliyun/photos";inp.value=t.path;
+  const pickBtn=document.createElement("button");pickBtn.className="linkbtn";pickBtn.textContent="浏览";
+  pickBtn.onclick=()=>openPicker("cloud",inp);
+  const enLabel=document.createElement("label");enLabel.style.cssText="display:flex;align-items:center;gap:4px;font-size:11px;flex:none;cursor:pointer";
+  enLabel.innerHTML='<input type="checkbox" '+(t.enabled?"checked":"")+'> 启用';
+  const delBtn=document.createElement("button");delBtn.className="linkbtn red";delBtn.textContent="删除";
+  delBtn.onclick=()=>{
+    if($("bdTargets").children.length<=1){toast("至少保留一个云端目标");return;}
+    el.remove();
+  };
+  row.append(inp,pickBtn,enLabel,delBtn);
+  el.appendChild(row);
+  return el;
+}
+
+$("bdAddTarget").onclick=()=>{
+  $("bdTargets").appendChild(makeTargetEditor({path:"",enabled:true}));
+};
+$("bdPickLocal").onclick=()=>openPicker("cloud",$("bdLocal"));
+$("bdCancelBtn").onclick=()=>$("bindOverlay").classList.add("hidden");
+$("bdSaveBtn").onclick=async()=>{
+  const targets=[...document.querySelectorAll(".tgt-editor")].map(el=>{
+    const inp=el.querySelector("input[type=text]");
+    const chk=el.querySelector("input[type=checkbox]");
+    return {path:inp.value.trim(),enabled:chk.checked};
+  }).filter(t=>t.path);
+  const body={
+    name:$("bdName").value.trim(),
+    localPath:$("bdLocal").value.trim(),
+    cloudTargets:targets,
+    scanDepth:999,
+    autoUpload:$("bdAuto").checked,
+    excludeNames:$("bdExcl").value,
+    syncMode:$("bdMode").value,
+    conflictPolicy:$("bdConflict").value,
+    sourceSnapshot:$("bdSnapshot").checked,
+  };
+  if(!body.localPath){$("bdError").textContent="请填写 OpenList 源目录";return;}
+  if(!targets.length){$("bdError").textContent="至少添加一个云端目录";return;}
+  $("bdSaveBtn").disabled=true;
+  try{
+    let d;
+    if(editingBindingId){
+      body.id=editingBindingId;
+      d=await api("/api/bindings/update",{body});
+    }else{
+      d=await api("/api/bindings/create",{body});
+    }
+    $("bindOverlay").classList.add("hidden");
+    toast("同步已保存");
+    // 自动触发首次扫描
+    if(d.binding)api("/api/bindings/scan",{body:{id:d.binding.id}});
+    loadBindings();
+  }catch(e){$("bdError").textContent=e.message;}
+  $("bdSaveBtn").disabled=false;
+};
+
+/* ---- 目录选择器 ---- */
+let pickerMode="local";       // local | cloud
+let pickerTargetInput=null;   // 选中后回填的 input
+let pickerPath="";
+let pickerEntries=[];
+
+function openPicker(mode,targetInput){
+  pickerMode=mode;
+  pickerTargetInput=targetInput;
+  pickerPath=mode==="local"?"":"/";
+  $("pickerOverlay").classList.remove("hidden");
+  loadPicker();
+}
+
+async function loadPicker(){
+  const body=$("pkBody");
+  body.innerHTML='<div class="loading"><span class="spin"></span>…</div>';
+  try{
+    let d;
+    if(pickerMode==="local"){
+      const agg=!pickerPath;
+      d=await api("/api/local/list?"+(agg?"aggregate=1":"path="+encodeURIComponent(pickerPath)));
+    }else{
+      d=await api("/api/cloud/list?path="+encodeURIComponent(pickerPath));
+    }
+    pickerEntries=d.entries||[];
+    pickerPath=d.path||pickerPath;
+    renderPickerCrumb();
+    $("pkCurrent").textContent="当前："+pickerPath;
+    body.innerHTML="";
+    if(!pickerEntries.length){
+      body.innerHTML='<div class="empty">空目录</div>';
+      return;
+    }
+    pickerEntries.filter(e=>e.isDir).forEach(e=>{
+      const row=document.createElement("div");row.className="pkrow";
+      row.innerHTML='<span style="width:20px">📁</span><span class="pn">'+esc(e.name)+'</span>';
+      row.ondblclick=()=>{pickerPath=e.path;loadPicker();};
+      body.appendChild(row);
+    });
+    if(!pickerEntries.filter(e=>e.isDir).length){
+      body.innerHTML='<div class="empty">没有子文件夹</div>';
+    }
+  }catch(e){body.innerHTML='<div class="empty">'+esc(e.message)+'</div>';}
+}
+
+function renderPickerCrumb(){
+  const crumb=$("pkCrumb");
+  const rootLabel=pickerMode==="local"?"全部存储":"/";
+  let html='<a data-p="'+(pickerMode==="local"?"":"/")+'">'+rootLabel+'</a>';
+  if(pickerPath){
+    const parts=pickerPath.split("/").filter(Boolean);
+    let acc="";
+    parts.forEach(p=>{
+      acc+=(acc?"/":"")+p;
+      html+='<span> / </span><a data-p="'+esc(acc)+'">'+esc(p)+'</a>';
+    });
+  }
+  crumb.innerHTML=html;
+  crumb.querySelectorAll("a").forEach(a=>a.onclick=()=>{pickerPath=a.dataset.p;loadPicker();});
+}
+
+$("pkRefresh").onclick=loadPicker;
+$("pkCancelBtn").onclick=()=>$("pickerOverlay").classList.add("hidden");
+$("pkSelectBtn").onclick=()=>{
+  if(pickerTargetInput){
+    pickerTargetInput.value=pickerPath;
+  }
+  $("pickerOverlay").classList.add("hidden");
+};
+
+/* ================= 设置 ================= */
+async function loadConfig(){
+  try{const d=await api("/api/config");state.config=d.config;applyConfig();}catch(e){}
+}
+function applyConfig(){const c=state.config||{};
+  $("cfgConc").value=c.uploadConcurrency??2;$("cfgRetry").value=c.maxAttempts??3;
+  $("cfgVerify").checked=!!c.verifyAfterUpload;
+  $("cfgExcl").value=(c.excludeNames||[]).join(", ");
+  $("cfgScanConc").value=c.scanConcurrency??8;
+  $("cfgLocal").value=c.localRoot||"";$("cfgCloud").value=c.cloudRoot||"/";
+  $("cfgAutoScan").checked=!!c.autoScan;
+  $("cfgFullScanInterval").value=c.fullScanIntervalDays??7;
+  $("cfgScanScheduleTime").value=c.scanScheduleTime||"03:00";
+  $("cfgBindingScanConc").value=c.bindingScanConcurrency??2;
+  $("cfgLocalCloudRoot").value=c.localSourceRoot||"";
+  // 没被用户选过来源的那一侧，来源**跟着所属栏走**：左栏在设置里被换成了 OpenList 源，
+  // 左侧来源默认就该是「云端」—— 否则左框会声明成本地、却没有本地栏可跟随。
+  // 分侧判断：用户只定了右侧，不影响左侧继续跟栏。
+  ["left","right"].forEach(w=>{
+    if(!cmpSideTouched[w])cmpSide[w]=paneSide(w==="left"?"local":"cloud");
+  });
+  // 默认路径取该框**所属栏**自己的起始目录：左栏是 OpenList 源时就是它的 OpenList
+  // 起始路径，不该把配置里的「本地目录」塞进左框。
+  // （用户自己的记忆值随后由 applyCompareMemory 覆盖，优先级更高。）
+  $("cmpLocal").value=cmpRootFor("left");
+  $("cmpCloud").value=cmpRootFor("right");
+  applyDraft();applyCompareMemory();
+}
+/* 未保存的设置草稿优先于服务端配置回填（切页/刷新不丢，保存成功后清除） */
+function applyDraft(){const d=uiState.cfgDraft||{};
+  if(d.cfgConc!==undefined)$("cfgConc").value=d.cfgConc;
+  if(d.cfgRetry!==undefined)$("cfgRetry").value=d.cfgRetry;
+  if(d.cfgVerify!==undefined)$("cfgVerify").checked=!!d.cfgVerify;
+  if(d.cfgExcl!==undefined)$("cfgExcl").value=d.cfgExcl;
+  if(d.cfgScanConc!==undefined)$("cfgScanConc").value=d.cfgScanConc;
+  if(d.cfgLocal!==undefined)$("cfgLocal").value=d.cfgLocal;
+  if(d.cfgCloud!==undefined)$("cfgCloud").value=d.cfgCloud;
+  if(d.cfgAutoScan!==undefined)$("cfgAutoScan").checked=!!d.cfgAutoScan;
+  if(d.cfgFullScanInterval!==undefined)$("cfgFullScanInterval").value=d.cfgFullScanInterval;
+  if(d.cfgScanScheduleTime!==undefined)$("cfgScanScheduleTime").value=d.cfgScanScheduleTime;
+  if(d.cfgLocalCloudRoot!==undefined)$("cfgLocalCloudRoot").value=d.cfgLocalCloudRoot;
+}
+/* 两侧同源时，下面只有一个同类型的栏，它只能带动一侧的路径。回填或记忆值若把两个框
+   落到同一个位置（必然比不出差异），就把**没有栏**的那一侧留空，等用户指定另一端。
+   历史存档里存着这种同值的情况完全可能 —— 那正是旧逻辑把两个框同步写的后果。 */
+function blankUnfollowedDup(){
+  const pane=cmpPaneMap();
+  const loose=["left","right"].find(w=>!pane[w]);
+  if(!loose)return;
+  const other=OTHER_SIDE[loose];
+  // 只在「两侧是同一来源类型」时纠正：不同类型下两个框填成同一串字纯属巧合
+  // （本地路径与云端路径同名），不该去动用户填的值。
+  if(cmpSide[loose]!==cmpSide[other])return;
+  if(cmpPathOf(loose)!==""&&cmpPathOf(loose)===cmpPathOf(other)){
+    cmpInputOf(loose).value="";
+  }
+}
+/* 对比参数：用户改过就记住，优先于服务端默认值 */
+function applyCompareMemory(){
+  // 来源侧别要在**路径之前**恢复：路径的 placeholder 由侧别决定。
+  // 只有用户**选过**的那一侧才恢复（cmpSideTouched 见上）：旧版本把侧别当成普通状态
+  // 一起存，连自动填充都写一遍，那种"自动产生的默认值"在左栏改成 OpenList 源之后
+  // 就是毒药 —— 恢复出来会声明成本地却没有本地栏。
+  if(cmpSideTouched.left&&(uiState.cmpLeftSide==="cloud"||uiState.cmpLeftSide==="local"))
+    cmpSide.left=uiState.cmpLeftSide;
+  if(cmpSideTouched.right&&(uiState.cmpRightSide==="cloud"||uiState.cmpRightSide==="local"))
+    cmpSide.right=uiState.cmpRightSide;
+  if(uiState.cmpLocal!==undefined)$("cmpLocal").value=uiState.cmpLocal;
+  if(uiState.cmpCloud!==undefined)$("cmpCloud").value=uiState.cmpCloud;
+  blankUnfollowedDup();
+  renderCmpSides();
+}
+function captureDraft(){
+  uiState.cfgDraft={cfgConc:$("cfgConc").value,cfgRetry:$("cfgRetry").value,
+    cfgVerify:$("cfgVerify").checked,
+    cfgExcl:$("cfgExcl").value,cfgScanConc:$("cfgScanConc").value,
+    cfgLocal:$("cfgLocal").value,cfgCloud:$("cfgCloud").value,
+    cfgAutoScan:$("cfgAutoScan").checked,
+    cfgFullScanInterval:$("cfgFullScanInterval").value,cfgScanScheduleTime:$("cfgScanScheduleTime").value,
+    cfgLocalCloudRoot:$("cfgLocalCloudRoot").value};
+  uiPersist();
+}
+function captureCompare(){
+  uiState.cmpLocal=$("cmpLocal").value;uiState.cmpCloud=$("cmpCloud").value;
+  uiState.cmpLeftSide=cmpSide.left;uiState.cmpRightSide=cmpSide.right;
+  uiState.cmpSideTouched={left:!!cmpSideTouched.left,right:!!cmpSideTouched.right};
+  uiPersist();
+}
+["cfgConc","cfgRetry","cfgVerify","cfgExcl","cfgScanConc","cfgLocal","cfgCloud","cfgAutoScan","cfgFullScanInterval","cfgScanScheduleTime","cfgBindingScanConc","cfgLocalCloudRoot"].forEach(id=>{
+  const el=$(id);el.addEventListener("change",captureDraft);el.addEventListener("input",captureDraft);});
+["cmpLocal","cmpCloud"].forEach(id=>{
+  const el=$(id);el.addEventListener("change",()=>{cmpBarAuto=false;captureCompare();});
+  el.addEventListener("input",()=>{cmpBarAuto=false;captureCompare();});});
+$("btnSaveCfg").onclick=async()=>{
+  const cfg={uploadConcurrency:+$("cfgConc").value,maxAttempts:+$("cfgRetry").value,
+    verifyAfterUpload:$("cfgVerify").checked,
+    excludeNames:$("cfgExcl").value.split(",").map(s=>s.trim()).filter(Boolean),
+    scanConcurrency:Math.min(32,Math.max(1,+$("cfgScanConc").value||8)),
+    localRoot:$("cfgLocal").value.trim(),cloudRoot:$("cfgCloud").value.trim()||"/",
+    autoScan:$("cfgAutoScan").checked,
+    fullScanIntervalDays:Math.max(1,Math.min(30,+$("cfgFullScanInterval").value||7)),
+    scanScheduleTime:$("cfgScanScheduleTime").value||"03:00",
+    bindingScanConcurrency:Math.max(1,Math.min(10,+$("cfgBindingScanConc").value||2)),
+    localSourceRoot:$("cfgLocalCloudRoot").value.trim()};
+  try{
+    const d=await api("/api/config",{body:cfg});
+    $("cfgMsg").textContent="已保存";setTimeout(()=>$("cfgMsg").textContent="",2000);
+    // 以服务端返回的配置为准，并清掉未保存草稿
+    state.config=d.config||cfg;delete uiState.cfgDraft;uiPersist(true);
+    applyConfig();
+    // 左栏云端起始路径变了且左栏当前是云端模式 → 重新加载左侧
+    const mode=(state.config.localSourceMode)||"fs";
+    if(mode==="cloud"){
+      const newRoot=state.config.localSourceRoot||"/";
+      loadLocal(newRoot,newRoot);
+    }
+  }catch(e){$("cfgMsg").textContent="保存失败："+e.message;}
+};
+$("btnManualScan").onclick=async()=>{
+  try{await api("/api/bindings/scan-all",{body:{}});toast("已触发全部同步扫描");loadBindings();}
+  catch(e){toast("扫描失败："+e.message);}
+};
+$("btnViewLog").onclick=()=>{
+  const p=$("logPanel");p.style.display=p.style.display==="none"?"block":"none";
+  if(p.style.display==="block"){loadLog();}
+};
+let logTimer=null;
+async function loadLog(){
+  try{
+    const level=$("logLevel").value;
+    const url="/api/log?lines=500"+(level?"&level="+level:"");
+    const d=await api(url);
+    const box=$("logBox");
+    if(!d.lines||!d.lines.length){box.innerHTML='<div style="color:#5a6b7d">（暂无日志）</div>';$("logCount").textContent="0 条";return;}
+    const colorMap={error:"#ff6b6b",warn:"#ffd93d",info:"#c8d6e5"};
+    box.innerHTML=d.lines.map(l=>{
+      const c=colorMap[l.l]||colorMap.info;
+      const tag=l.l==="error"?"[ERROR]":l.l==="warn"?"[WARN] ":"[INFO] ";
+      return '<div style="display:flex;gap:8px"><span style="color:#5a6b7d;flex-shrink:0">'+(l.t||"")+'</span>'+
+        '<span style="color:'+c+';flex-shrink:0">'+tag+'</span>'+
+        '<span style="color:'+c+';word-break:break-all">'+esc(l.m)+'</span></div>';
+    }).join("");
+    $("logCount").textContent=d.total+" 条";
+    box.scrollTop=box.scrollHeight;
+  }catch(e){$("logBox").innerHTML='<div style="color:#ff6b6b">加载失败：'+esc(e.message)+'</div>';}
+}
+$("logLevel").onchange=loadLog;
+$("btnLogRefresh").onclick=loadLog;
+$("btnLogClear").onclick=async()=>{
+  if(!await showConfirm("确定清空运行日志？"))return;
+  try{await api("/api/log/clear",{body:{}});toast("日志已清空");loadLog();}
+  catch(e){toast("清空失败："+e.message);}
+};
+$("btnLogDownload").onclick=async()=>{
+  try{
+    const d=await api("/api/log?lines=2000");
+    const text=d.lines.map(l=>"["+l.t+"] ["+l.l.toUpperCase()+"] "+l.m).join("\n");
+    const blob=new Blob([text],{type:"text/plain;charset=utf-8"});
+    const a=document.createElement("a");a.href=URL.createObjectURL(blob);
+    a.download="cloud-sync-log-"+new Date().toISOString().slice(0,10)+".txt";
+    a.click();URL.revokeObjectURL(a.href);
+  }catch(e){toast("下载失败："+e.message);}
+};
+$("logAutoRefresh").onchange=e=>{
+  if(logTimer){clearInterval(logTimer);logTimer=null;}
+  if(e.target.checked){logTimer=setInterval(loadLog,3000);}
+};
+// 页面加载时启动自动刷新
+logTimer=setInterval(()=>{if($("logPanel").style.display==="block")loadLog();},3000);
+
+/* ================= 启动 ================= */
+async function bootstrap(){
+  await loadConfig();
+  // 记住了路径就按记住的来（不再跟随浏览位置），否则跟随
+  cmpBarAuto=!(uiState.cmpLocal||uiState.cmpCloud);
+  // 恢复上次浏览位置；目录已不存在时自动降级到默认根（见 loadLocal/loadCloud 的 fallback）
+  const cloudMode=(state.config.localSourceMode==="cloud");
+  const defaultLocal=cloudMode?(state.config.localSourceRoot||"/"):(state.config.localRoot||"");
+  const lp=uiState.localPath!==undefined?uiState.localPath:defaultLocal;
+  const cp=uiState.cloudPath!==undefined?uiState.cloudPath:(state.config.cloudRoot||"/");
+  loadLocal(lp,defaultLocal);
+  loadCloud(cp,state.config.cloudRoot||"/");
+  loadTasks();startTaskLoop();
+  // 恢复上次所在标签页（"compare" 这类已下线的页签会被 switchTab 兜回传输页）
+  if(uiState.tab)switchTab(uiState.tab);else switchTab("transfer");
+}
+(async function init(){
+  state.base=await probeBase();
+  if(state.base===null){$("localList").innerHTML='<div class="empty">找不到应用服务</div>';return;}
+  await refreshConnection();
+  await loadConfig();
+  if(state.connection&&state.connection.online){bootstrap();}
+  else{showConnect();}
+})();
+</script>
+</body>
+</html>

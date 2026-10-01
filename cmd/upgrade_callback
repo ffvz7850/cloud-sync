@@ -1,0 +1,33 @@
+#!/bin/bash
+
+### 升级后执行：补齐新增的默认配置项（不覆盖用户已有值）
+
+APPNAME="cloud-sync"
+PKGETC="${TRIM_PKGETC:-/var/apps/${APPNAME}/etc}"
+PKGVAR="${TRIM_PKGVAR:-/var/apps/${APPNAME}/var}"
+CONF_FILE="${PKGETC}/settings.conf"
+LOG_FILE="${PKGVAR}/info.log"
+
+mkdir -p "${PKGETC}" "${PKGVAR}" 2> /dev/null
+
+if [ ! -f "${CONF_FILE}" ]; then
+    cat > "${CONF_FILE}" << 'EOF'
+OPENLIST_URL=
+PYTHON=
+EOF
+fi
+
+for kv in "OPENLIST_URL=" "PYTHON="; do
+    key="${kv%%=*}"
+    if ! grep -q "^[[:space:]]*${key}[[:space:]]*=" "${CONF_FILE}" 2> /dev/null; then
+        echo "${kv}" >> "${CONF_FILE}"
+    fi
+done
+
+if [ -f "${PKGVAR}/credentials.json" ]; then
+    chmod 600 "${PKGVAR}/credentials.json" 2> /dev/null
+fi
+
+echo "$(date '+%Y-%m-%d %H:%M:%S') - upgrade_callback: config ensured" >> "${LOG_FILE}"
+
+exit 0

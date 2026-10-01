@@ -1,0 +1,32 @@
+#!/bin/bash
+
+### 安装文件应用后执行：准备运行目录与默认配置
+
+APPNAME="cloud-sync"
+PKGVAR="${TRIM_PKGVAR:-/var/apps/${APPNAME}/var}"
+PKGETC="${TRIM_PKGETC:-/var/apps/${APPNAME}/etc}"
+LOG_FILE="${PKGVAR}/info.log"
+
+mkdir -p "${PKGVAR}" "${PKGETC}" 2> /dev/null
+chmod 755 "${PKGVAR}" "${PKGETC}" 2> /dev/null
+
+# 只在首次安装时写入默认配置，升级时保留用户已有配置
+if [ ! -f "${PKGETC}/settings.conf" ]; then
+    cat > "${PKGETC}/settings.conf" << 'EOF'
+# OpenList 上传客户端配置（修改后到 应用中心 重启应用生效）
+# OpenList 地址，一般留空在界面里填；填了会作为界面默认值
+OPENLIST_URL=
+# 指定 Python 解释器，留空则自动探测（优先使用飞牛的 python312）
+PYTHON=
+EOF
+    chmod 644 "${PKGETC}/settings.conf" 2> /dev/null
+fi
+
+# 凭据文件权限收紧：里面是 OpenList 的访问令牌
+if [ -f "${PKGVAR}/credentials.json" ]; then
+    chmod 600 "${PKGVAR}/credentials.json" 2> /dev/null
+fi
+
+echo "$(date '+%Y-%m-%d %H:%M:%S') - install_callback: dirs ready" >> "${LOG_FILE}"
+
+exit 0

@@ -1,0 +1,20 @@
+#!/bin/bash
+
+### 卸载清理后执行
+
+APPNAME="cloud-sync"
+PKGVAR="${TRIM_PKGVAR:-/var/apps/${APPNAME}/var}"
+APPDEST="${TRIM_APPDEST:-/var/apps/${APPNAME}/target}"
+
+rm -f "${APPDEST}/app.sock" 2> /dev/null
+rm -f "${PKGVAR}/app.pid" 2> /dev/null
+
+# 卸载时把凭据一并清掉：里面是 access token 和私钥，留着没有意义还有风险。
+# 其余业务配置（config.json）保留，便于重装后接着用。
+rm -f "${PKGVAR}/credentials.json" 2> /dev/null
+
+if [ "${wizard_data_action}" = "delete" ]; then
+    rm -rf "${PKGVAR}" 2> /dev/null
+fi
+
+exit 0

@@ -1,0 +1,10 @@
+#!/bin/bash
+
+### 卸载前执行：停止服务
+
+MAIN_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -x "${MAIN_DIR}/main" ]; then
+    "${MAIN_DIR}/main" stop
+fi
+
+exit 0

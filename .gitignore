@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# FPK build output
+*.fpk
+dist/
+
+# Temp files
+.tmp-*
+*.tmp
+*.log
+
+# OS
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Data (runtime generated)
+app/data/
+*.json.bak
+*.corrupt-*

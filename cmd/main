@@ -1,0 +1,174 @@
+#!/bin/bash
+# 豆包云盘 (cloud-sync) 生命周期脚本
+# 由飞牛应用中心调用：main start / main stop / main status / main restart
+
+APPNAME="cloud-sync"
+APPDEST="${TRIM_APPDEST:-/var/apps/${APPNAME}/target}"
+PKGVAR="${TRIM_PKGVAR:-/var/apps/${APPNAME}/var}"
+PKGETC="${TRIM_PKGETC:-/var/apps/${APPNAME}/etc}"
+
+LOG_FILE="${PKGVAR}/info.log"
+PID_FILE="${PKGVAR}/app.pid"
+SOCKET_FILE="${APPDEST}/app.sock"
+CONF_FILE="${PKGETC}/settings.conf"
+SERVER="${APPDEST}/server/main.py"
+
+log_msg() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${LOG_FILE}"
+}
+
+# settings.conf 是 KEY=VALUE 纯文本，值里可能带空格，不能用 source 直接加载
+conf_get() {
+    [ -f "${CONF_FILE}" ] || return 1
+    sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" "${CONF_FILE}" | tail -n 1
+}
+
+# 依次探测可用的 Python 3：优先飞牛的依赖应用，其次系统自带
+find_python() {
+    for p in \
+        /var/apps/python312/target/bin/python3 \
+        /var/apps/python311/target/bin/python3 \
+        /var/apps/python310/target/bin/python3 \
+        /usr/bin/python3 \
+        /usr/local/bin/python3 \
+        /bin/python3; do
+        if [ -x "${p}" ]; then echo "${p}"; return 0; fi
+    done
+    for n in python3 python; do
+        if command -v "${n}" > /dev/null 2>&1; then command -v "${n}"; return 0; fi
+    done
+    return 1
+}
+
+check_process() {
+    local pid=$1
+    if [ -n "${pid}" ] && kill -0 "${pid}" 2> /dev/null; then
+        return 0
+    fi
+    return 1
+}
+
+status() {
+    if [ -f "${PID_FILE}" ]; then
+        local pid
+        pid=$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')
+        if check_process "${pid}"; then
+            return 0
+        fi
+        rm -f "${PID_FILE}"
+    fi
+    return 1
+}
+
+start_process() {
+    if status; then
+        return 0
+    fi
+
+    mkdir -p "${PKGVAR}" "${PKGETC}" 2> /dev/null
+
+    if [ ! -f "${SERVER}" ]; then
+        echo "应用文件缺失：${SERVER}" > "${TRIM_TEMP_LOGFILE:-/dev/null}"
+        log_msg "server file missing: ${SERVER}"
+        return 1
+    fi
+
+    local PY
+    PY=$(conf_get PYTHON)
+    if [ -z "${PY}" ]; then
+        PY=$(find_python)
+    fi
+    if [ -z "${PY}" ]; then
+        echo "未找到 Python 3，本应用需要 Python 3.8 及以上版本。" > "${TRIM_TEMP_LOGFILE:-/dev/null}"
+        log_msg "python3 not found"
+        return 1
+    fi
+
+    rm -f "${SOCKET_FILE}"
+    log_msg "starting: python=${PY} socket=${SOCKET_FILE}"
+
+    PYTHONUNBUFFERED=1 \
+        TRIM_DATA_ACCESSIBLE_PATHS="${TRIM_DATA_ACCESSIBLE_PATHS}" \
+        "${PY}" "${SERVER}" run \
+        --socket "${SOCKET_FILE}" \
+        >> "${LOG_FILE}" 2>&1 &
+
+    printf "%s" "$!" > "${PID_FILE}"
+
+    # 给进程一点启动时间，确认没有立刻退出且 socket 已就绪
+    local count=0
+    while [ ${count} -lt 10 ]; do
+        if ! status; then
+            log_msg "process exited during startup, see ${LOG_FILE}"
+            return 1
+        fi
+        sleep 1
+        count=$((count + 1))
+        if [ -S "${SOCKET_FILE}" ]; then
+            break
+        fi
+    done
+
+    # 等满 10 秒仍没看到 socket，说明后端启动即崩或初始化卡住
+    if [ ! -S "${SOCKET_FILE}" ]; then
+        log_msg "timeout: socket ${SOCKET_FILE} not created within 10s"
+        echo "应用启动超时：socket 未创建，见 ${LOG_FILE}" > "${TRIM_TEMP_LOGFILE:-/dev/null}"
+        stop_process
+        return 1
+    fi
+
+    log_msg "started, pid=$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')"
+    return 0
+}
+
+stop_process() {
+    log_msg "stopping ..."
+
+    if [ -r "${PID_FILE}" ]; then
+        local pid
+        pid=$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')
+        if check_process "${pid}"; then
+            log_msg "send TERM to pid ${pid}"
+            kill -TERM "${pid}" >> "${LOG_FILE}" 2>&1
+
+            local count=0
+            while check_process "${pid}" && [ ${count} -lt 12 ]; do
+                sleep 1
+                count=$((count + 1))
+            done
+
+            if check_process "${pid}"; then
+                log_msg "send KILL to pid ${pid}"
+                kill -KILL "${pid}" >> "${LOG_FILE}" 2>&1
+                sleep 1
+            fi
+        fi
+        rm -f "${PID_FILE}"
+    fi
+
+    rm -f "${SOCKET_FILE}"
+    return 0
+}
+
+case "$1" in
+    start)
+        start_process
+        ;;
+    stop)
+        stop_process
+        ;;
+    status)
+        if status; then
+            exit 0
+        else
+            exit 3
+        fi
+        ;;
+    restart)
+        stop_process
+        start_process
+        ;;
+    *)
+        exit 1
+        ;;
+esac

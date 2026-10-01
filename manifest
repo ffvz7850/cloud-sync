@@ -1,0 +1,17 @@
+appname               = cloud-sync
+version               = 2.15.36
+display_name          = 云端互传
+desc                  = 把本地文件上传到 OpenList 聚合的云盘（豆包 / 阿里 / 百度等），体验对齐百度网盘、阿里云盘桌面客户端。<br><br><b>左右双栏</b>：左边是 NAS 本地目录树，右边是 OpenList 云端目录树；左边勾选文件或整个文件夹，一键上传到右边当前目录。<br><br><b>上传体验</b>：实时进度与速度、完成后读回云端校验大小、失败自动重试（指数退避）、多次失败后可手动重传；大文件走分片上传，支持断点续传，应用重启后未完成的任务自动接着传。<br><br><b>比对与双向传输</b>：目录比对已并入「文件传输」页 —— 左右两栏各勾选一个文件夹，点中间「比对」即出结果。差异按「仅本地有 / 仅云端有 / 大小不一致」分三组展示，每组可一键全选上传、全选下载、全选清除，也可逐行手动操作；条目多时可用「仅本地 / 仅云端 / 大小不一致 / 已同步」四个状态标签按分类筛选（点一下只看该类，再点恢复全部）。清除是不可逆操作，执行前必须二次确认，并写入本地审计日志。<br><br><b>下载与断点续传</b>：云端多出的文件可批量下载回本地；大文件流式写入临时文件、支持 Range 断点续传，校验大小一致后才改名落地，绝不留下半截文件当成功。<br><br><b>目录同步备份</b>：把 OpenList 源目录绑定到一个或多个云端目录，增量扫描后只把缺失文件复制过去，可开自动上传；复制走 OpenList 服务端完成，不额外占用本条链路带宽。只新增、绝不删除云端或本地已有文件。<br><br><b>登录鉴权</b>：填 OpenList 地址 + 账号密码即可，应用只保存哈希后的凭据并自动续期访问令牌，不需要你反复登录。<br><br><b>界面</b>：飞牛官方配色，接入统一网关，不额外暴露管理端口。WebDAV 挂载请直接使用 OpenList 自带的 /dav。
+source                = thirdparty
+platform              = all
+os_min_version        = 0.9.0
+maintainer            = ffvz
+maintainer_url        = https://doc.oplist.org/
+distributor           = ffvz
+install_dep_apps      = python312
+ctl_stop              = true
+checkport             = false
+desktop_uidir         = ui
+desktop_applaunchname = cloud-sync.Application
+changelog             = 2.15.36 代码审查复审问题修复<br>1) 修复 list_all 分页漏数据：新增服务端上限动态探测，cap=100/300/500/1000 均验证不丢条目<br>2) 修复上传队列 claim 后未 release：skip-existing 命中、ensure_dir 失败、mtime 读取失败三个提前 return 全部收进 try/finally，重试不再卡死<br>3) 修复 curl 后端管道死锁、半截响应当成功、头扫描负偏移三个问题<br>4) 修复自动扫描定时器吞异常：重新排期失败加日志+24h兜底，不再永久停止<br>5) 修复下载队列 overwrite 存而不用：overwrite=False 时本地已存在则跳过<br>6) 修复 reset_queue 锁内阻塞：stop() 的 join 移到锁外，改配置不再卡所有请求<br>7) 恢复 #midbar min-width 到 118px，防止上传按钮被裁切<br>8) 清空日志的原生 confirm() 改为自绘弹层，避免飞牛 iframe 内弹窗被拦<br><br>2.15.35 修复白屏死锁
+checksum              = 6bc9489528019536b86b27381e36c40b

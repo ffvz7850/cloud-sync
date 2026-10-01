@@ -1,0 +1,10 @@
+#!/bin/bash
+
+### 设置页保存前执行：先停服务，避免配置被运行中的进程回写覆盖
+
+MAIN_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -x "${MAIN_DIR}/main" ]; then
+    "${MAIN_DIR}/main" stop
+fi
+
+exit 0
