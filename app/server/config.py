@@ -18,7 +18,7 @@ import threading
 
 # 应用自身标识，前端探测基地址时会核对它
 APP_NAME = "cloud-sync"
-APP_VERSION = "2.15.36"
+APP_VERSION = "2.15.38"
 
 DEFAULT_OPENLIST_URL = "http://192.168.0.10:5244"
 
