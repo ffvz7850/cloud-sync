@@ -880,7 +880,7 @@ class VerdictTest(unittest.TestCase):
     def test_task_running_marks_uploading_with_progress(self):
         ctx, store, bid = ready_ctx(copy_tasks=["t1"], tasks_supported=True)
         store.upload_files(bid, rel_paths=["a.txt"])
-        ctx._client.task_list = {"undone": [{"id": "t1", "progress": 42}],
+        ctx._client.task_list = {"undone": [{"id": "t1", "state": 1, "progress": 42}],
                                  "done": []}
         store.refresh_statuses(bid)
         st = target_state(store, bid, "a.txt")
@@ -1105,7 +1105,7 @@ class TaskFreshnessTest(unittest.TestCase):
         """
         ctx, store, bid = ready_ctx(copy_tasks=["t1"], tasks_supported=True)
         store.upload_files(bid, rel_paths=["a.txt"])
-        ctx._client.task_list = {"undone": [{"id": "t1", "name": "a.txt", "progress": 10}],
+        ctx._client.task_list = {"undone": [{"id": "t1", "name": "a.txt", "state": 1, "progress": 10}],
                                  "done": []}
         store.refresh_statuses(bid)
         self.assertEqual(target_state(store, bid, "a.txt")["status"], "uploading")

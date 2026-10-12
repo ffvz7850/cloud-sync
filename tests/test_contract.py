@@ -129,14 +129,18 @@ class UploadButtonLayoutContractTest(unittest.TestCase):
                       "#panes 必须用 minmax(0,1fr) auto minmax(0,1fr)，"
                       "裸写 1fr 等价 minmax(auto,1fr)，长路径会把中栏上传按钮挤出可视区")
 
-    def test_body_is_flex_column(self):
-        """高度链根：body 必须是 flex 纵向容器，#main 的 flex:1 才生效，列表才能内部滚动。"""
+    def test_body_is_flex_container_and_main_is_column(self):
+        """高度链根：body 是 flex 容器（侧边栏 + 主区并排）；#main 内部纵向 flex，列表才能内部滚动。"""
         import re as _re
         m = _re.search(r"(?m)^body\{([^}]*)\}", self.html)
         self.assertTrue(m, "找不到 body 规则")
         norm = m.group(1).replace(" ", "")
         self.assertIn("display:flex", norm, "body 不是 flex 容器")
-        self.assertIn("flex-direction:column", norm, "body 必须纵向 flex")
+        # 侧边栏导航与主区并排（body 用 row），高度链由 #main 的 column 承接
+        m2 = _re.search(r"(?m)^#main\{([^}]*)\}", self.html)
+        self.assertTrue(m2, "找不到 #main 规则")
+        norm2 = m2.group(1).replace(" ", "")
+        self.assertIn("flex-direction:column", norm2, "#main 必须纵向 flex")
 
     def test_midbar_no_fixed_width(self):
         """#midbar 不能再有任何固定宽度约束。"""
@@ -332,10 +336,12 @@ class AssetTest(unittest.TestCase):
     def test_wizard_dir_exists(self):
         self.assertTrue(os.path.isdir(os.path.join(ROOT, "wizard")))
 
-    def test_wizard_is_empty(self):
+    def test_wizard_contains_only_uninstall_wizard(self):
         entries = [e for e in os.listdir(os.path.join(ROOT, "wizard"))
                    if not e.startswith(".")]
-        self.assertEqual(entries, [], "wizard/ 里不该有文件，实际有：%s" % entries)
+        # uninstall 是合法的卸载向导（让用户在卸载时选择保留/清除数据），其余应为空
+        self.assertEqual([e for e in entries if e != "uninstall"], [],
+                         "wizard/ 里除 uninstall 外不该有文件，实际有：%s" % entries)
 
     def test_icons_present_and_sized(self):
         import struct
@@ -506,8 +512,10 @@ class SettingsLayoutV21ContractTest(unittest.TestCase):
     """v2.1.0 设置页布局契约：统一栅格、控件可收缩、复选框整行可点、
     元素 id 不变、去掉内联定宽。"""
 
-    SETTINGS_IDS = ("cfgConc", "cfgRetry", "cfgSkip", "cfgVerify",
-                    "cfgExcl", "cfgLocal", "cfgCloud", "cfgLocalMode", "cfgLocalCloudRoot",
+    SETTINGS_IDS = ("cfgConc", "cfgRetry", "cfgVerify",
+                    "cfgExcl", "cfgLocal", "cfgCloud", "cfgLocalCloudRoot",
+                    "cfgAutoScan", "cfgFullScanInterval", "cfgScanScheduleTime",
+                    "cfgBindingScanConc",
                     "btnSaveCfg", "cfgMsg", "btnViewLog", "btnDisconnect", "logBox")
 
     @classmethod

@@ -446,8 +446,13 @@ async function testSelectAndEnqueue() {
   fileRow.dispatchEvent(new env.window.MouseEvent("click", { bubbles: true }));
   eq("选择计数更新", doc.getElementById("selInfo").textContent, "已选 1 项");
 
-  doc.getElementById("btnUpload").dispatchEvent(
-    new env.window.MouseEvent("click", { bubbles: true }));
+  // 两步确认：第一次点进入「确认上传 N 项？」确认态，第二次点才真正入队
+  const btnUpload = doc.getElementById("btnUpload");
+  btnUpload.dispatchEvent(new env.window.MouseEvent("click", { bubbles: true }));
+  await flush();
+  check("第一次点进入确认态", btnUpload.textContent.indexOf("确认上传") >= 0,
+        btnUpload.textContent);
+  btnUpload.dispatchEvent(new env.window.MouseEvent("click", { bubbles: true }));
   await flush();
   const payload = env.backend.state.enqueuePayload;
   check("发出了入队请求", !!payload);
@@ -605,7 +610,6 @@ async function testFormMemory() {
     cloudPath: "/ShowA",
     cmpLocal: "/vol1/1000/Cmp",
     cmpCloud: "/cld",
-    cmpDepth: "5",
     cfgDraft: { cfgConc: "6" },
     queueFilter: "failed",
   };
@@ -635,7 +639,6 @@ async function testFormMemory() {
         cloudCall && cloudCall.url);
   eq("对比本地目录回填", doc.getElementById("cmpLocal").value, "/vol1/1000/Cmp");
   eq("对比云端目录回填", doc.getElementById("cmpCloud").value, "/cld");
-  eq("对比深度回填", doc.getElementById("cmpDepth").value, "5");
   eq("未保存的设置草稿回填", doc.getElementById("cfgConc").value, "6");
   check("队列筛选状态被记忆（失败）",
         doc.querySelector('#queueFilter .fbtn[data-filter="failed"]').classList.contains("active"));
@@ -693,8 +696,8 @@ async function testCompareFlow() {
   check("比对后差异面板出现",
         !doc.getElementById("diffPane").classList.contains("hidden"));
   const head = doc.getElementById("diffHead").textContent;
-  check("统计里有「仅本地」", head.indexOf("仅本地") >= 0, head);
-  check("统计里有「仅云端」", head.indexOf("仅云端") >= 0, head);
+  check("统计里有「仅左侧」", head.indexOf("仅左侧") >= 0, head);
+  check("统计里有「仅右侧」", head.indexOf("仅右侧") >= 0, head);
   check("统计里有「大小不一致」", head.indexOf("大小不一致") >= 0, head);
 
   const out = doc.getElementById("cmpOut").textContent;
@@ -1234,7 +1237,8 @@ async function testCompareSideDefaultsAndSwitch() {
   await tapCmpSide(env, doc, "left", "cloud");
   check("切到云端后该按钮点亮", cmpSideBtn(doc, "left", "cloud").classList.contains("on"));
   check("原来那枚熄灭", !cmpSideBtn(doc, "left", "local").classList.contains("on"));
-  eq("切到同源时不再预填出同款路径", doc.getElementById("cmpLocal").value, "");
+  eq("左栏跟着切成 OpenList 源，左框填的是它的起始路径",
+     doc.getElementById("cmpLocal").value, "/");
   check("左侧输入框提示改成云端",
         doc.getElementById("cmpLocal").placeholder.indexOf("云端") >= 0,
         doc.getElementById("cmpLocal").placeholder);
@@ -1254,23 +1258,28 @@ async function testCompareSideDefaultsAndSwitch() {
    「两侧是同一个位置」—— 而云端只有一个浏览栏，用户没有任何办法把它们分开。 */
 
 async function testSameSourceCloudKeepsPeer() {
-  console.log("\n[v2.9.3 · 云端↔云端：浏览右侧不再改写左侧]");
+  console.log("\n[v2.9.4 · 云端↔云端：两个云端栏各跟各的]");
   const env = makeWindow();
   await flush();
   const doc = env.document;
 
+  // 左→云端会把左栏也切成 OpenList 源，于是界面上有两个云端栏（左栏 + 右栏）
   await tapCmpSide(env, doc, "left", "cloud");
-  eq("切到同源时不再预填出同款路径", doc.getElementById("cmpLocal").value, "");
-  check("同源时给出引导", doc.getElementById("cmpHint").classList.contains("warn"));
-  check("引导里说要手动填另一侧",
-        doc.getElementById("cmpHint").textContent.indexOf("手动填写") >= 0,
+  eq("左框跟到左栏（OpenList）起始路径", doc.getElementById("cmpLocal").value, "/");
+  eq("右框仍在云端起始路径", doc.getElementById("cmpCloud").value, "/");
+  check("两侧同源但各有各的栏 → 不再打「只有一个栏」的警告",
+        !doc.getElementById("cmpHint").classList.contains("warn"),
         doc.getElementById("cmpHint").textContent);
 
-  doc.getElementById("cmpLocal").value = "/cloud-a";
-  await env.window.loadCloud("/cloud-b");
+  await env.window.loadLocal("/cloud-a");   // 左栏（OpenList 源）
   await flush();
-  eq("浏览云端栏 → 右侧跟上", doc.getElementById("cmpCloud").value, "/cloud-b");
-  eq("左侧不被覆盖（本次修复的核心）", doc.getElementById("cmpLocal").value, "/cloud-a");
+  eq("进左栏 → 左框跟上", doc.getElementById("cmpLocal").value, "/cloud-a");
+  eq("右框不动", doc.getElementById("cmpCloud").value, "/");
+
+  await env.window.loadCloud("/cloud-b");   // 右栏
+  await flush();
+  eq("进右栏 → 右框跟上", doc.getElementById("cmpCloud").value, "/cloud-b");
+  eq("左框不被右栏改写", doc.getElementById("cmpLocal").value, "/cloud-a");
 
   env.backend.state.compareResult = pairResult("/cloud-a", "/cloud-b");
   await tapCompare(env, doc);
@@ -1283,14 +1292,37 @@ async function testSameSourceCloudKeepsPeer() {
   env.window.close();
 }
 
+/* 默认后端里 `localRoot` 是空字符串 —— 「本地↔本地」同源时两侧会不会被预填成
+   同一个路径就看不出来（兜底值恰好也是空）。这个后端把它设成非空，专门用来
+   暴露「分不到栏却照样拿配置兜底」这条差路径。 */
+function localRootBackend(localRoot) {
+  return makeBackend({
+    "api/config": (query, method, init) => {
+      if (method === "POST") return { ok: true, config: JSON.parse(init.body) };
+      return { ok: true, config: {
+        localRoot: localRoot, cloudRoot: "/", uploadConcurrency: 2, maxAttempts: 3,
+        skipExisting: true, verifyAfterUpload: true, scanDepth: 3,
+        excludeNames: ["*.tmp"] } };
+    },
+  });
+}
+
 async function testSameSourceLocalSymmetric() {
   console.log("\n[v2.9.3 · 本地↔本地：对称，浏览左侧不改写右侧]");
-  const env = makeWindow();
+  const env = makeWindow({ backend: localRootBackend("/vol1/1000") });
   await flush();
   const doc = env.document;
 
+  // 右侧选「本地」时下面已经没有空闲的本地栏了（`cmpPaneOf("right")` 为 null）。
+  // 此时若拿配置里的 localRoot 兜底，填出来的正好是**本地栏自己的根目录** —— 也就
+  // 是左侧马上要填的那个路径，两个框同路径，注定比不出差异。所以必须在 localRoot
+  // 非空的前提下测，才真的在测「分不到栏就留空」这条（空值时两边都是空，看不出）。
   await tapCmpSide(env, doc, "right", "local");
   eq("切到同源时右侧不预填同款路径", doc.getElementById("cmpCloud").value, "");
+  check("两个框不会被预填成同一个路径（那是必然比不出差异的组合）",
+        doc.getElementById("cmpLocal").value !== doc.getElementById("cmpCloud").value,
+        "左=" + doc.getElementById("cmpLocal").value +
+        " 右=" + doc.getElementById("cmpCloud").value);
   doc.getElementById("cmpCloud").value = "/vol1/1000/b";
   await env.window.loadLocal("/vol1/1000/a");
   await flush();
@@ -1301,21 +1333,27 @@ async function testSameSourceLocalSymmetric() {
 }
 
 async function testCrossSourcePanesDoNotCollide() {
-  console.log("\n[v2.9.3 · 交叉来源：一栏一框，各跟各的]");
+  console.log("\n[v2.9.4 · 左云端 + 右本地：右框没有本地栏，只能手填]");
   const env = makeWindow();
   await flush();
   const doc = env.document;
 
-  await tapCmpSide(env, doc, "left", "cloud");
-  await tapCmpSide(env, doc, "right", "local");
-  check("同源引导撤掉", !doc.getElementById("cmpHint").classList.contains("warn"));
-  await env.window.loadCloud("/cloud-x");
+  await tapCmpSide(env, doc, "left", "cloud");   // 左栏切成 OpenList 源
+  await tapCmpSide(env, doc, "right", "local");  // 右框声明「本地」
+  const hint = doc.getElementById("cmpHint");
+  check("右框没有本地栏可跟 → 给出引导", hint.classList.contains("warn"));
+  check("说明是「没有本地栏」（左栏已换成 OpenList 源），而不是「只有一个云端栏」",
+        hint.textContent.indexOf("没有本地栏") >= 0, hint.textContent);
+
+  await env.window.loadCloud("/cloud-x");   // 右栏（云端）
   await flush();
-  eq("云端栏 → 左侧（左侧来源是云端）", doc.getElementById("cmpLocal").value, "/cloud-x");
-  await env.window.loadLocal("/vol1/1000/y");
+  eq("右框声明的是「本地」，不被云端栏改写", doc.getElementById("cmpCloud").value, "");
+  eq("左框仍跟左栏", doc.getElementById("cmpLocal").value, "/");
+
+  await env.window.loadLocal("/vol1/1000/y");  // 左栏（OpenList 源）
   await flush();
-  eq("本地栏 → 右侧（右侧来源是本地）", doc.getElementById("cmpCloud").value, "/vol1/1000/y");
-  eq("左框没被本地栏改掉", doc.getElementById("cmpLocal").value, "/cloud-x");
+  eq("进左栏 → 左框跟上", doc.getElementById("cmpLocal").value, "/vol1/1000/y");
+  eq("右框仍空（没有本地栏可跟）", doc.getElementById("cmpCloud").value, "");
   check("全程没有抛异常", env.pageErrors.length === 0, env.pageErrors.join(" | "));
   env.window.close();
 }
@@ -1336,7 +1374,7 @@ async function testDefaultSidesStillFollowPanes() {
 }
 
 async function testSameSourcePickFillsOneSide() {
-  console.log("\n[v2.9.3 · 「比对 ⇄」在两侧同源时只填一侧]");
+  console.log("\n[v2.9.4 · 「比对 ⇄」在两侧同源时各填各的栏]");
   const env = makeWindow();
   await flush();
   const doc = env.document;
@@ -1344,9 +1382,9 @@ async function testSameSourcePickFillsOneSide() {
   doc.getElementById("btnComparePick").dispatchEvent(
     new env.window.MouseEvent("click", { bubbles: true }));
   await flush();
-  eq("云端栏填给了右侧", doc.getElementById("cmpCloud").value, "/");
-  eq("左侧没被填成同一个位置", doc.getElementById("cmpLocal").value, "");
-  check("同位置照样给出可操作的报错",
+  eq("左框填的是左栏（OpenList）当前位置", doc.getElementById("cmpLocal").value, "/");
+  eq("右框填的是右栏当前位置", doc.getElementById("cmpCloud").value, "/");
+  check("两个都被填成根目录 → 照样给出可操作的同位置报错",
         doc.getElementById("toast").textContent.indexOf("改到别的目录") >= 0,
         doc.getElementById("toast").textContent);
   check("全程没有抛异常", env.pageErrors.length === 0, env.pageErrors.join(" | "));
@@ -1462,26 +1500,23 @@ async function testCloudLeftPaneFollowsItsOwnPane() {
   env.window.close();
 }
 
-async function testCloudLeftPaneNoLocalPaneHint() {
-  console.log("\n[v2.9.4 · 左栏是 OpenList 源时选「本地」：要说清没有本地栏]");
+async function testCloudLeftPaneSwitchBackToLocal() {
+  console.log("\n[v2.9.4 · 左栏 OpenList 源时选「本地」：左栏切回 NAS，不再提示缺栏]");
   const env = makeWindow({ backend: cloudLeftBackend() });
   await flush();
   const doc = env.document;
   await tapCmpSide(env, doc, "left", "local");
 
   const hint = doc.getElementById("cmpHint");
-  check("给出引导", hint.classList.contains("warn"));
-  check("说清是「界面上没有本地栏」，而不是「只有一个云端栏」",
-        hint.textContent.indexOf("没有本地栏") >= 0, hint.textContent);
-  check("指出原因是左栏换成了 OpenList 源",
-        hint.textContent.indexOf("OpenList") >= 0, hint.textContent);
-  check("给出可操作的补救（切成云端）", hint.textContent.indexOf("云端") >= 0, hint.textContent);
+  check("左栏已切回本地 → 不再打「没有本地栏」警告", !hint.classList.contains("warn"),
+        hint.textContent);
+  check("提示按实际来源写「默认左本地」", hint.textContent.indexOf("默认左本地") >= 0,
+        hint.textContent);
 
-  doc.getElementById("cmpLocal").value = "/vol1/1000/x";
-  await env.window.loadLocal("/本地存储/别的");
+  eq("左框跟着左栏（本地）的起始路径", doc.getElementById("cmpLocal").value, "");
+  await env.window.loadLocal("/vol1/1000/x");
   await flush();
-  eq("左框声明的是「本地」，不许被云端栏改写",
-     doc.getElementById("cmpLocal").value, "/vol1/1000/x");
+  eq("在本地栏进文件夹 → 左框照样跟", doc.getElementById("cmpLocal").value, "/vol1/1000/x");
   eq("右框照常跟右栏", doc.getElementById("cmpCloud").value, "/");
   check("全程没有抛异常", env.pageErrors.length === 0, env.pageErrors.join(" | "));
   env.window.close();
@@ -1505,9 +1540,9 @@ async function testLocalSourceModeSwitchRefollows() {
   eq("手填过就不再被浏览覆盖（前提成立）", doc.getElementById("cmpLocal").value,
      "/vol1/1000/old");
 
-  doc.getElementById("cfgLocalMode").value = "cloud";
-  doc.getElementById("cfgLocalCloudRoot").value = "/本地存储";
-  await tapSaveCfg(env, doc);
+  // 设置页的 cfgLocalMode 已移除：左栏来源切换改由比对条上的「本地 / 云端」按钮触发
+  // （setCmpSide 内部会保存 localSourceMode 并重新加载左栏）。
+  await tapCmpSide(env, doc, "left", "cloud");
 
   check("保存后左侧来源跟着栏变成云端",
         cmpSideBtn(doc, "left", "cloud").classList.contains("on"));
@@ -1530,8 +1565,8 @@ async function testTouchedSideNotOverriddenByModeSwitch() {
   await tapCmpSide(env, doc, "right", "local");
   check("右侧被用户切成本地", cmpSideBtn(doc, "right", "local").classList.contains("on"));
 
-  doc.getElementById("cfgLocalMode").value = "cloud";
-  await tapSaveCfg(env, doc);
+  // 设置页的 cfgLocalMode 已移除：改用比对条按钮触发左栏来源切换
+  await tapCmpSide(env, doc, "left", "cloud");
 
   check("用户选过的右侧来源保留",
         cmpSideBtn(doc, "right", "local").classList.contains("on"));
@@ -1560,7 +1595,9 @@ async function testCompareCloudToCloud() {
 
   const head = doc.getElementById("diffHead").textContent;
   check("徽标不再说「仅本地」", head.indexOf("仅本地") < 0, head);
-  eq("两枚徽标都叫「仅云端」", (head.match(/仅云端/g) || []).length, 2);
+  check("两枚徽标用左右区分（仅左侧 + 仅右侧）",
+        (head.match(/仅左侧/g) || []).length >= 1 &&
+        (head.match(/仅右侧/g) || []).length >= 1, head);
   check("用左右区分两侧",
         head.indexOf("左侧云端") >= 0 && head.indexOf("右侧云端") >= 0, head);
 
@@ -1602,8 +1639,8 @@ async function testCompareCloudToCloudCopy() {
   const p = env.backend.state.syncCopyPayload;
   check("走了 /api/sync/copy", !!p, JSON.stringify(p));
   eq("side 是云端", p && p.side, "cloud");
-  eq("目标目录是右侧云端目录", p && p.target, "/cloud-b");
-  eq("源路径用的是服务端给的 absPath", p && p.items[0], "/cloud-a/a.mkv");
+  eq("源路径用的是服务端给的 absPath", p && p.items[0].src, "/cloud-a/a.mkv");
+  eq("目标落点是右侧云端路径", p && p.items[0].dst, "/cloud-b/a.mkv");
   check("没有误发上传请求", env.backend.state.enqueuePayload === null,
         JSON.stringify(env.backend.state.enqueuePayload));
   check("没有误发下载请求", env.backend.state.downloadPayload === null,
@@ -1630,8 +1667,8 @@ async function testCompareLocalToLocalCopy() {
   await tapRowAct(env, doc, "toRight");
   const p = env.backend.state.syncCopyPayload;
   eq("side 是本地", p && p.side, "local");
-  eq("目标目录是右侧本地目录", p && p.target, "/vol1/1000/B");
-  eq("源路径是左侧本地路径", p && p.items[0], "/vol1/1000/A/a.mkv");
+  eq("源路径是左侧本地路径", p && p.items[0].src, "/vol1/1000/A/a.mkv");
+  eq("目标落点是右侧本地路径", p && p.items[0].dst, "/vol1/1000/B/a.mkv");
   env.window.close();
 }
 
@@ -1689,8 +1726,8 @@ async function testCompareResultKeepsItsOwnSides() {
   doc.getElementById("cmpCloud").value = "/";
   await tapCompare(env, doc);
   const before = doc.getElementById("diffHead").textContent;
-  check("默认组合下说的是「仅本地」", before.indexOf("仅本地") >= 0, before);
-  check("默认组合下不出现左右前缀", before.indexOf("左侧") < 0, before);
+  check("默认组合下说的是「仅左侧」", before.indexOf("仅左侧") >= 0, before);
+  check("默认组合下不再说「仅本地」（统一用左右前缀）", before.indexOf("仅本地") < 0, before);
 
   // 比对完成后把输入框那一侧的来源切到云端：
   // **已经出来的那份结果不该跟着变** —— 它的侧别是服务端回传的，
@@ -1872,8 +1909,10 @@ async function testLayoutShrinkChainV21() {
 /** 设置页布局：元素齐全、栅格约束、无内联定宽。 */
 async function testSettingsLayoutV21() {
   console.log("\n[设置页布局不变量]");
-  const needIds = ["cfgConc", "cfgRetry", "cfgSkip", "cfgVerify", "cfgExcl",
-                   "cfgLocal", "cfgCloud", "cfgLocalMode", "cfgLocalCloudRoot",
+  const needIds = ["cfgConc", "cfgRetry", "cfgVerify", "cfgExcl",
+                   "cfgLocal", "cfgCloud", "cfgLocalCloudRoot",
+                   "cfgAutoScan", "cfgFullScanInterval", "cfgScanScheduleTime",
+                   "cfgBindingScanConc",
                    "btnSaveCfg", "cfgMsg", "btnViewLog",
                    "btnDisconnect", "logBox"];
   const env = makeWindow();
@@ -1938,8 +1977,6 @@ async function testSettingsSaveRoundTripV21() {
   setVal("cfgExcl", "*.tmp, *.log");
   setVal("cfgLocal", "/vol1/1000");
   setVal("cfgCloud", "/cl");
-  doc.getElementById("cfgSkip").checked = false;
-  doc.getElementById("cfgSkip").dispatchEvent(new env.window.Event("change", { bubbles: true }));
   doc.getElementById("cfgVerify").checked = true;
   doc.getElementById("cfgVerify").dispatchEvent(new env.window.Event("change", { bubbles: true }));
   await sleep(500);
@@ -1955,7 +1992,6 @@ async function testSettingsSaveRoundTripV21() {
   const body = sent && sent.body;
   eq("保存：并发数", body && body.uploadConcurrency, 5);
   eq("保存：重试次数", body && body.maxAttempts, 7);
-  eq("保存：跳过已存在=false（复选框参与）", body && body.skipExisting, false);
   eq("保存：完成后校验=true（复选框参与）", body && body.verifyAfterUpload, true);
   eq("保存：排除规则解析为数组", body && JSON.stringify(body.excludeNames), JSON.stringify(["*.tmp", "*.log"]));
   eq("保存：本地目录", body && body.localRoot, "/vol1/1000");
@@ -1966,11 +2002,11 @@ async function testSettingsSaveRoundTripV21() {
   const after = JSON.parse(env.window.localStorage.getItem("dd_ui_state") || "{}");
   check("保存成功后草稿被清除", after.cfgDraft === undefined, JSON.stringify(after.cfgDraft));
 
-  // 第二趟：把「跳过已存在」改为勾选，保存体应随之变 true
+  // 第二趟：把「完成后校验」取消勾选，保存体应随之变 false（验证复选框参与保存）
   const before2 = env.backend.state.calls.filter((c) => c.url.endsWith("/api/config") &&
     c.method === "POST").length;
-  doc.getElementById("cfgSkip").checked = true;
-  doc.getElementById("cfgSkip").dispatchEvent(new env.window.Event("change", { bubbles: true }));
+  doc.getElementById("cfgVerify").checked = false;
+  doc.getElementById("cfgVerify").dispatchEvent(new env.window.Event("change", { bubbles: true }));
   doc.getElementById("btnSaveCfg").dispatchEvent(
     new env.window.MouseEvent("click", { bubbles: true }));
   await flush();
@@ -1978,7 +2014,7 @@ async function testSettingsSaveRoundTripV21() {
     c.method === "POST").pop();
   check("第二趟确实发出了保存", env.backend.state.calls.filter((c) =>
     c.url.endsWith("/api/config") && c.method === "POST").length === before2 + 1);
-  eq("勾选后保存 skipExisting=true", sent2 && sent2.body && sent2.body.skipExisting, true);
+  eq("取消勾选后保存 verifyAfterUpload=false", sent2 && sent2.body && sent2.body.verifyAfterUpload, false);
   env.window.close();
 }
 
@@ -2021,8 +2057,8 @@ async function testMemoryDirGoneFallback() {
         doc.querySelectorAll("#localList .flist-row").length + " 行");
   check("云端列表照常渲染（不白屏）",
         doc.querySelectorAll("#cloudList .flist-row").length >= 1);
-  check("面包屑落在回退目录而非失效目录",
-        doc.getElementById("localCrumb").textContent.indexOf("1000") >= 0 &&
+  check("面包屑落在回退根目录而非失效目录",
+        doc.getElementById("localCrumb").textContent.indexOf("根目录") >= 0 &&
         doc.getElementById("localCrumb").textContent.indexOf("Gone") < 0,
         doc.getElementById("localCrumb").textContent);
   check("降级过程没有抛异常", env.pageErrors.length === 0, env.pageErrors.join(" | "));
@@ -2226,25 +2262,18 @@ async function testSyncModeOnlyAdd() {
 
 /** 对比深度留空时应省略字段（交给服务端用默认值），而不是算成 0。 */
 async function testCompareDepthOptional() {
-  console.log("\n[对比深度可留空]");
+  console.log("\n[对比深度固定为不限]");
   const backend = makeBackend();
   const env = makeWindow({ backend: backend });
   await flush();
   const doc = env.document;
   doc.getElementById("cmpLocal").value = "/vol1/1000";
-  doc.getElementById("cmpDepth").value = "";
   doc.getElementById("btnCompare").onclick();
   await flush();
-  let call = backend.state.calls.filter((c) => c.url.includes("/api/compare")).pop();
-  check("深度留空 → 请求体里没有 depth",
-        call && call.body && !("depth" in call.body),
+  const call = backend.state.calls.filter((c) => c.url.includes("/api/compare")).pop();
+  check("深度固定为 999（后端上限，递归到底，不再需要用户填）",
+        call && call.body && call.body.depth === 999,
         JSON.stringify(call && call.body));
-
-  doc.getElementById("cmpDepth").value = "5";
-  doc.getElementById("btnCompare").onclick();
-  await flush();
-  call = backend.state.calls.filter((c) => c.url.includes("/api/compare")).pop();
-  eq("填了深度就带上", call.body.depth, 5);
   env.window.close();
 }
 
@@ -2439,7 +2468,7 @@ async function main() {
     testRestoreDedupesStoredSameSource,
     // v2.9.4 左栏自己也能是 OpenList 源（界面上有两个云端栏）
     testCloudLeftPaneFollowsItsOwnPane,
-    testCloudLeftPaneNoLocalPaneHint,
+    testCloudLeftPaneSwitchBackToLocal,
     testLocalSourceModeSwitchRefollows,
     testTouchedSideNotOverriddenByModeSwitch,
     testCompareLocalToLocalCopy,

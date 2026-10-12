@@ -278,7 +278,7 @@ function makeWindow(options) {
 
 /** 切换到绑定页。 */
 async function gotoBindings(doc, win) {
-  doc.querySelector('#tabs button[data-tab="bindings"]').dispatchEvent(
+  doc.querySelector('#sidebar button[data-tab="bindings"]').dispatchEvent(
     new win.MouseEvent("click", { bubbles: true }));
   await flush();
 }
@@ -294,7 +294,7 @@ async function testBindingsTab() {
   await flush();
   const doc = env.document;
 
-  const tabBtn = doc.querySelector('#tabs button[data-tab="bindings"]');
+  const tabBtn = doc.querySelector('#sidebar button[data-tab="bindings"]');
   check("绑定标签按钮存在", !!tabBtn);
   eq("同步按钮文字", tabBtn.textContent.trim(), "同步备份");
 

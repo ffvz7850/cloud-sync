@@ -618,7 +618,8 @@ class SyncCopyTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(data["copied"], 0)
         self.assertEqual(len(data["failed"]), 1)
-        self.assertIn("就是目标目录", data["failed"][0]["error"])
+        # items 传字符串、target 同名时，落点= target/源basename，即「目标在源内部」。
+        self.assertIn("内部", data["failed"][0]["error"])
 
     def test_local_copy_target_inside_source_is_refused(self):
         """目标落在源里面 → 复制会把自己套进自己，一路递归下去。"""
@@ -1018,10 +1019,12 @@ class ConfigSanitizeTest(unittest.TestCase):
         self.assertEqual(data["config"]["excludeNames"],
                          list(config.DEFAULT_CONFIG["excludeNames"]))
 
-    def test_auto_scan_interval_has_floor(self):
+    def test_full_scan_interval_has_floor(self):
+        # autoScanInterval 已拆成 fullScanIntervalDays（天）+ scanScheduleTime（HH:MM），
+        # 下限从「30 分钟」改为「1 天」。
         status, data = jcall(self.ctx, "POST", "/api/config",
-                             {"autoScanInterval": 1})
-        self.assertGreaterEqual(data["config"]["autoScanInterval"], 30)
+                             {"fullScanIntervalDays": 0})
+        self.assertGreaterEqual(data["config"]["fullScanIntervalDays"], 1)
 
     def test_local_source_mode_whitelisted(self):
         status, data = jcall(self.ctx, "POST", "/api/config",

@@ -228,47 +228,90 @@ class ListAllTest(unittest.TestCase):
         self.assertEqual(len(transport.calls), 1)
 
     def test_exactly_one_page_one_request(self):
-        transport = FakeListTransport(self._items(1000))
+        n = openlist.DEFAULT_PER_PAGE
+        transport = FakeListTransport(self._items(n))
         out = self._list(transport)
-        self._assert_complete(out, 1000)
+        self._assert_complete(out, n)
         self.assertEqual(len(transport.calls), 1,
-                         "刚好一页不该多打一次空请求，也不该触发自适应")
+                         "刚好一页不该多打一次空请求，也不该触发探测重跑")
 
-    def test_just_over_one_page_adapts_to_two_requests(self):
-        transport = FakeListTransport(self._items(1001))
+    def test_just_over_one_page_two_requests(self):
+        n = openlist.DEFAULT_PER_PAGE + 1
+        transport = FakeListTransport(self._items(n))
         out = self._list(transport)
-        self._assert_complete(out, 1001)
-        self.assertEqual(transport.per_pages, [1000, 1001],
-                         "第一页探到 total 后应改用 total 一次拿全")
-        self.assertEqual(len(transport.calls), 2)
-
-    def test_large_dir_two_requests_instead_of_pages(self):
-        transport = FakeListTransport(self._items(8000))
-        out = self._list(transport)
-        self._assert_complete(out, 8000)
+        self._assert_complete(out, n)
         self.assertEqual(len(transport.calls), 2,
-                         "8000 项：原来要 8 次往返，自适应后只该 2 次")
+                         "刚超过一页该恰好两次请求，不多翻空页")
 
-    def test_over_max_per_page_falls_back_to_plain_paging(self):
-        n = 12000          # > MAX_PER_PAGE，不启用自适应
+    def test_large_dir_fixed_paging_no_skip(self):
+        n = 8000
         transport = FakeListTransport(self._items(n))
         out = self._list(transport)
         self._assert_complete(out, n)
         self.assertTrue(all(p == openlist.DEFAULT_PER_PAGE for p in transport.per_pages),
-                        "超上限不该把 per_page 顶到 %d" % n)
+                        "per_page 应稳定为 %d" % openlist.DEFAULT_PER_PAGE)
+        self.assertEqual(len(transport.calls), n // openlist.DEFAULT_PER_PAGE,
+                         "8000 项按固定分页该 %d 次，且不重不漏"
+                         % (n // openlist.DEFAULT_PER_PAGE))
+
+    def test_very_large_dir_still_complete(self):
+        """上万条目的大目录：固定分页照样拿全，per_page 不会被越攒越大。
+
+        （早先这里测的是「自适应一次拿全」的降级分支；那条路径已经删掉了 ——
+        服务端会把 per_page 夹到自己上限，「一次拿全」本来就拿不全，还多一次
+        失败往返。现在只保留固定分页的完整性保证。）
+        """
+        n = 12000
+        transport = FakeListTransport(self._items(n))
+        out = self._list(transport)
+        self._assert_complete(out, n)
+        self.assertTrue(all(p == openlist.DEFAULT_PER_PAGE for p in transport.per_pages),
+                        "per_page 应稳定为 %d" % openlist.DEFAULT_PER_PAGE)
         self.assertEqual(len(transport.calls), n // openlist.DEFAULT_PER_PAGE)
 
     def test_server_capping_per_page_still_returns_everything(self):
-        """服务端把 per_page 夹到自身上限时，也**绝不能漏条目**。
+        """服务端把 per_page 夹到**比请求更小**时，也绝不能漏条目。
 
         漏条目会被判成「云端没有」→ 已经传好的文件被重复上传。
-        这里服务端一律只给 2000 条，翻页起点按夹后的 2000 算。
+        关键在 `list_all` 的第一页探测：请求 200 但服务端只给 100，此时若不把
+        per_page 重新对齐到 100，offset 会按 200 跳，中间的条目整段被跳过；
+        更糟的是 `len(content) < per_page` 会被误判成「已到尾部」而提前收工。
         """
-        n = 5000
-        transport = FakeListTransport(self._items(n), per_page_cap=2000)
+        n = 500
+        cap = 100                    # 必须 **小于** DEFAULT_PER_PAGE，否则夹不到
+        self.assertLess(cap, openlist.DEFAULT_PER_PAGE,
+                        "这个用例要的就是「服务端给得比请求少」，cap 必须小于请求值")
+        transport = FakeListTransport(self._items(n), per_page_cap=cap)
         out = self._list(transport)
         self._assert_complete(out, n)
-        self.assertEqual(transport.per_pages[0], openlist.DEFAULT_PER_PAGE)
+        self.assertEqual(transport.per_pages[0], openlist.DEFAULT_PER_PAGE,
+                         "第一次仍按默认页大小请求，才知道服务端有没有夹")
+        self.assertTrue(all(p == cap for p in transport.per_pages[1:]),
+                        "探测之后所有后续请求都该用服务端实际给的上限 %d：%s"
+                        % (cap, transport.per_pages))
+        self.assertEqual(transport.page_nums[1], 1, "探测后要从第一页重跑")
+
+    def test_server_capping_without_probe_loses_items(self):
+        """钉死「不探测会发生什么」：这是探测存在的理由，不是锦上添花。
+
+        若 `list_all` 不做第一页探测，offset 就按请求的 per_page 跳 —— 服务端
+        实际每页只给了 cap 条，于是每次都会漏掉一半。这个用例用**直接构造的**
+        错误分页（模拟没探测的那份实现）把后果写死，免得以后有人以为
+        「反正 _assert_complete 会兜住」而把探测删掉。
+        """
+        n, cap, req = 500, 100, openlist.DEFAULT_PER_PAGE
+        items = self._items(n)
+        got = []
+        page = 1
+        while True:
+            start = (page - 1) * req          # ← 错误：没探测，仍按请求值跳
+            chunk = items[start:start + cap]  # 服务端只给 cap 条
+            got.extend(chunk)
+            if len(chunk) < req:              # ← 同一份「到尾部」判断，这里会误判
+                break
+            page += 1
+        self.assertLess(len(got), n, "没探测的实现必然漏条目，这里用来印证后果")
+        self.assertEqual(len(got), cap, "第一页看到没拿满就直接收工了")
 
     def test_respects_larger_total_than_items(self):
         """total 比实际条目多（服务端还在写入）时不得死循环，也不能重复条目。"""

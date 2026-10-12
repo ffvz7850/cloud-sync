@@ -141,6 +141,82 @@ class RunSuccessTest(unittest.TestCase):
         os.unlink(local)
 
 
+class FailEnsureDirClient(FakeClient):
+    """ensure_dir 一律失败（云端只读 / 权限不足）。"""
+
+    def ensure_dir(self, path):
+        raise openlist.OpenlistError("目标只读")
+
+
+class ClaimReleaseTest(unittest.TestCase):
+    """`_claim` 之后的**每一条**退出路径都必须走到 `_release`。
+
+    历史上三处提前 return 都漏了释放：skip-existing 命中、`ensure_dir` 失败、
+    `getmtime` 读不到。后果不是报错，而是更阴的一种 —— `_running` 里留下 id，
+    `_next_pending()` 从此永远跳过它，任务明明是 pending 却再也不会被执行，
+    界面一直卡在「排队中」。所以这里直接盯 `_running`，而不是盯返回值。
+    """
+
+    def _assert_released(self, q, tid, label):
+        self.assertNotIn(tid, q._running,
+                         "%s：任务已走完这一轮，_running 里不该还留着它的 id" % label)
+        # 更实在的后果：id 残留会让 worker 再也挑不到这个任务。
+        # 把状态临时摆回 pending，看看挑选能不能命中。
+        with q._lock:
+            t = q._find(tid)
+        self.assertIsNotNone(t, "%s：任务丢了" % label)
+        saved = t["status"]
+        t["status"] = upload_queue.PENDING
+        try:
+            self.assertIsNotNone(q._next_pending(),
+                                 "%s：释放不干净 → worker 再也挑不到这个任务" % label)
+        finally:
+            t["status"] = saved
+
+    def test_skip_existing_hit_releases_claim(self):
+        client = FakeClient()
+        q = make_queue(client)
+        local = make_file(b"samedata")
+        client.remote_files["/dst/a.txt"] = os.path.getsize(local)
+        t = add_one(q, local)
+        import config
+        cfg = config.load_config()
+        cfg["skipExisting"] = True
+        config.save_config(cfg)
+        q._run_task(t)
+        self.assertEqual(q.get(t["id"])["status"], "skipped")
+        self._assert_released(q, t["id"], "跳过已存在")
+        os.unlink(local)
+
+    def test_ensure_dir_failure_releases_claim(self):
+        q = make_queue(FailEnsureDirClient())
+        local = make_file()
+        t = add_one(q, local)
+        q._run_task(t)
+        self.assertEqual(q.get(t["id"])["status"], "failed")
+        self.assertIn("云端目录", q.get(t["id"])["error"])
+        self._assert_released(q, t["id"], "创建云端目录失败")
+        os.unlink(local)
+
+    def test_unreadable_mtime_releases_claim(self):
+        """本地文件在"`stat` 之后、读 mtime 之前"被删：`getmtime` 抛 OSError，
+        这条提前 return 也必须释放认领。"""
+        q = make_queue()
+        local = make_file()
+        t = add_one(q, local)
+        real_getmtime = os.path.getmtime
+        os.path.getmtime = lambda p: (_ for _ in ()).throw(OSError("文件已消失"))
+        try:
+            q._run_task(t)
+        finally:
+            os.path.getmtime = real_getmtime
+        self.assertEqual(q.get(t["id"])["status"], "failed")
+        self.assertIn("不可读", q.get(t["id"])["error"])
+        self._assert_released(q, t["id"], "本地文件不可读")
+        if os.path.exists(local):
+            os.unlink(local)
+
+
 class RetryTest(unittest.TestCase):
     def test_auto_retry_then_success(self):
         client = FakeClient()

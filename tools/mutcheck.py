@@ -213,14 +213,14 @@ MUTATIONS = [
      '            e["peerAbsPath"] = ""',
      PY_TEST("test_verify.py")),
     ("云端复制不再按父目录分组（同一批拆成逐条发）", "app/server/http_api.py",
-     "                data = client.copy(src_dir, target_dir, names, overwrite=True)",
-     "                data = client.copy(src_dir, target_dir, names[:1], overwrite=True)",
+     "                data = client.copy(src_dir, dst_dir, names, overwrite=True)",
+     "                data = client.copy(src_dir, dst_dir, names[:1], overwrite=True)",
      PY_TEST("test_api.py")),
     ("云端复制整组失败后不再降级逐条（一个坏条目拖垮全组）", "app/server/http_api.py",
-     "                for name, path in pairs:", "                for name, path in []:",
+     "                for name, path in members:", "                for name, path in []:",
      PY_TEST("test_api.py")),
     ("云端复制放行根目录（等于把整个存储再拷一份）", "app/server/http_api.py",
-     '            if path == "/":', "            if False:",
+     '            if src == "/":', "            if False:",
      PY_TEST("test_api.py")),
     ("本地复制放行存储空间根目录", "app/server/http_api.py",
      "            if os.path.normcase(src) in root_norms:", "            if False:",
@@ -228,13 +228,15 @@ MUTATIONS = [
     ("本地复制不拦「目标在源内部」（会无限自我复制）", "app/server/http_api.py",
      "                if is_path_allowed(dst, [src]):", "                if False:",
      PY_TEST("test_api.py")),
+    # 目标目录的落点判据换过：以前判 `dst` 本身，现在判 dst 的**父目录** ——
+    # 比对复制的目标常常是还不存在的目录，判 dst 自己等于把整批都放过。
     ("本地复制的目标目录越过白名单", "app/server/http_api.py",
-     "        if not is_path_allowed(dst, roots):", "        if False:",
+     "            if not is_path_allowed(parent, roots):", "            if False:",
      PY_TEST("test_api.py")),
 
     # ---- v2.9.2 前端：来源切换 ----
     ("切换来源时不清旧路径（拿一串本地路径去比云端）", "app/www/index.html",
-     '  cmpInputOf(which).value=cmpPaneOf(which)?(paneCompareRoot(side)||""):"";',
+     '  cmpInputOf(which).value=cmpPaneOf(which)?(cmpRootFor(which)||""):"";',
      "  ;",
      JS_TEST("test_ui.js")),
     ("前端忽略服务端回传的侧别（文案退回按栏位猜）", "app/www/index.html",
@@ -277,9 +279,11 @@ MUTATIONS = [
      "    if(p){out[w]=p;taken[p]=true;}",
      "    const p=null;\n    if(p){out[w]=p;taken[p]=true;}",
      JS_TEST("test_ui.js")),
+    # 「分不到栏就留空」这条判据换过名字：paneCompareRoot(side) → cmpRootFor(which)
+    # —— 后者先过一遍「这一侧到底有没有栏」，两侧同源时才不会预填出同一个位置。
     ("切到同源时仍预填出同款路径（切完就注定比不出差异）", "app/www/index.html",
-     '  cmpInputOf(which).value=cmpPaneOf(which)?(paneCompareRoot(side)||""):"";',
-     '  cmpInputOf(which).value=paneCompareRoot(side)||"";',
+     '  cmpInputOf(which).value=cmpPaneOf(which)?(cmpRootFor(which)||""):"";',
+     '  cmpInputOf(which).value=cmpRootFor(which)||"";',
      JS_TEST("test_ui.js")),
     ("「比对 ⇄」又把两侧填成同一个位置", "app/www/index.html",
      '      if(pane[w])cmpInputOf(w).value=paneCompareRoot(pane[w])||"";',
@@ -320,9 +324,38 @@ MUTATIONS = [
      "  if(!avail.length){",
      "  if(false){",
      JS_TEST("test_ui.js")),
-    ("换了左栏来源模式后不恢复「跟随浏览位置」", "app/www/index.html",
-     '      if(!cmpSideTouched.left)cmpSide.left=paneSide("local");\n      cmpBarAuto=true;',
-     "      ;",
+    # 原先这里给的是 applyConfig 里「单边默认值 + cmpBarAuto」那两句；那两件事
+    # 现在分工了：默认来源在 applyConfig 用 forEach 给两侧一起刷（另有条目守着），
+    # 「跟随浏览位置」的恢复落在 setCmpSide 的 cmpBarAuto 上 —— 换 left 来源时
+    # 必须把冻结在旧路径上的比对条解冻，否则左框会一直停在失效的本地路径。
+    ("换了左栏来源后不恢复「跟随浏览位置」（比对条冻在旧路径上）", "app/www/index.html",
+     '  cmpBarAuto=true;\n  clearCmpError();',
+     '  clearCmpError();',
+     JS_TEST("test_ui.js")),
+
+    # ---- 本轮新逻辑（原先一点变异覆盖都没有） ----
+    ("list_all 不再探测服务端单页上限（服务端夹小 per_page 时中间条目整段漏掉）",
+     "app/server/openlist.py",
+     "            if (not probed and page == 1 and len(content) < per_page",
+     "            if (False and page == 1 and len(content) < per_page",
+     PY_TEST("test_openlist.py")),
+    ("上传收尾不再释放认领（_running 残留 → 任务永久卡在「排队中」）",
+     "app/server/upload_queue.py",
+     "            self._release(tid)",
+     "            pass",
+     PY_TEST("test_upload_queue.py")),
+    ("curl 退出码非 0 但已吐出半截响应 → 被当成真响应用下去（目录列表少一半却不报错）",
+     "app/server/httpclient.py",
+     "    if proc.returncode != 0:",
+     "    if False:",
+     PY_TEST("test_httpclient.py")),
+    ("云端复制不带 overwrite（目标已存在时整个 OpenList 任务直接失败）",
+     "app/server/http_api.py",
+     "                data = client.copy(src_dir, dst_dir, names, overwrite=True)",
+     "                data = client.copy(src_dir, dst_dir, names, overwrite=False)",
+     PY_TEST("test_api.py")),
+    ("上传按钮不再两步确认（一次误点就把整个目录传上去）", "app/www/index.html",
+     "  if(!uploadConfirmTimer){", "  if(false){",
      JS_TEST("test_ui.js")),
 ]
 
