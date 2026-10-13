@@ -648,6 +648,32 @@ class BindingStore(object):
     # 增量扫描
     # ------------------------------------------------------------------
 
+    def _has_inflight_upload(self, b):
+        """该绑定是否有「排队中 / 传输中」的上传任务（含提交阶段）。
+
+        上传进行中禁止扫描：扫描会把正在复制的文件判成缺失，若开了自动上传
+        会在复制尚未完成时再次提交同一批文件，造成重复上传。
+        """
+        if self.is_submitting(b.get("id")):
+            return True
+        for f in (b.get("files") or []):
+            for ts in (f.get("targets") or {}).values():
+                if ts.get("status") in IN_FLIGHT_STATES:
+                    return True
+        return False
+
+    def can_scan(self, binding_id):
+        """扫描前置闸门：返回 (允许, 原因)。上传/提交进行中或已在扫描时不允许。"""
+        with self._lock:
+            b = self._find(binding_id)
+            if not b:
+                return False, "绑定不存在"
+            if b.get("scanStatus") == SCAN_RUNNING:
+                return False, "该同步正在扫描中"
+            if self._has_inflight_upload(b):
+                return False, "该同步有上传任务进行中，请等待完成后再扫描"
+        return True, ""
+
     def set_scan_concurrency(self, n):
         """设置全局扫描并发数。重建信号量（已在运行的不受影响，新任务按新限制排队）。"""
         n = max(1, min(10, int(n or 2)))
@@ -658,12 +684,20 @@ class BindingStore(object):
         self._log("全局扫描并发数设置为 %d" % n)
 
     def start_scan(self, binding_id, background=True):
-        """启动增量扫描。background=True 时在后台线程执行，立即返回。"""
+        """启动增量扫描。background=True 时在后台线程执行，立即返回。
+
+        上传/提交进行中拒绝扫描（见 can_scan），避免重复上传。
+        """
+        ok, reason = self.can_scan(binding_id)
+        if not ok:
+            if reason == "绑定不存在":
+                return False
+            # 已在扫描 / 上传进行中：跳过并记录，scan_all 与自动扫描据此静默跳过
+            self._log("跳过扫描（%s）：%s" % (binding_id[:8], reason))
+            return False
         with self._lock:
             b = self._find(binding_id)
             if not b:
-                return False
-            if b.get("scanStatus") == SCAN_RUNNING:
                 return False
             b["scanStatus"] = SCAN_RUNNING
             b["scanError"] = ""
@@ -684,14 +718,21 @@ class BindingStore(object):
         return True
 
     def scan_all(self):
-        """扫描所有绑定（后台）。返回触发扫描的数量。"""
-        count = 0
+        """扫描所有绑定（后台）。有上传/提交任务进行中的绑定自动跳过，避免重复上传。
+
+        返回 (started, skipped)：started=本次实际触发的数量，skipped=因扫描中或
+        上传进行中而跳过的数量。
+        """
+        started = 0
+        skipped = 0
         with self._lock:
             ids = [b["id"] for b in self._bindings]
         for bid in ids:
             if self.start_scan(bid):
-                count += 1
-        return count
+                started += 1
+            else:
+                skipped += 1
+        return started, skipped
 
     # -- 自动扫描：每隔 N 天在指定时间点执行全量扫描 --
     # 平时不做任何扫描，到点才对所有绑定做一次完整对比。
@@ -752,11 +793,12 @@ class BindingStore(object):
             if self._auto_stop.is_set():
                 return
             try:
-                n = self.scan_all()
+                n, skipped = self.scan_all()
                 if n:
-                    self._log("auto scheduled scan triggered %d binding(s) (every %d days at %s)"
+                    self._log("auto scheduled scan triggered %d binding(s) (every %d days at %s)%s"
                               % (n, getattr(self, "_auto_days", 7),
-                                 getattr(self, "_schedule_time", "03:00")))
+                                 getattr(self, "_schedule_time", "03:00"),
+                                 "，%d 个因上传中/扫描中跳过" % skipped if skipped else ""))
             except Exception as exc:
                 self._log("auto full-scan error: %s" % exc)
             if not self._auto_stop.is_set():

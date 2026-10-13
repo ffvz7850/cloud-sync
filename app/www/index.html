@@ -2194,10 +2194,13 @@ function renderBindingCard(b,oldInfo){
   ops.appendChild(autoWrap);
 
   const busy=bindState.submitting.has(b.id);
+  const uploading=(b.inFlightCount||0)>0;
+  const blocked=busy||uploading;
+  const busyTip=busy?"正在提交上传，请稍候":(uploading?"有 "+(b.inFlightCount||0)+" 个文件正在上传，请等待完成后再扫描":"");
   const mkOp=(txt,fn,blockWhileBusy)=>{const btn=document.createElement("button");btn.className="linkbtn";btn.textContent=txt;
-    // 提交进行中禁用「扫描」：扫描会重写各目标的状态，与正在提交的那批文件
-    // 抢同一份数据 —— 属于典型误操作。
-    if(blockWhileBusy&&busy){btn.disabled=true;btn.title="正在提交上传，请稍候";}
+    // 上传/提交进行中禁用「扫描」：扫描会把正在复制的文件判成缺失，
+    // 开了自动上传就会在复制未完成时重复提交同一批文件 —— 典型误操作。
+    if(blockWhileBusy&&blocked){btn.disabled=true;btn.title=busyTip;}
     btn.onclick=fn;return btn;};
   ops.appendChild(mkOp(isOpen?"收起":"文件",()=>toggleBinding(b.id)));
   ops.appendChild(mkOp("扫描",()=>doScan(b.id),true));
@@ -2484,6 +2487,13 @@ async function uploadFolder(bid,node){
 }
 
 async function doScan(bid){
+  // 前端第一道拦截：上传/提交进行中禁止扫描，避免重复上传。
+  // （后端的 can_scan 闸门是最终裁决，这里只是少发一次无用请求。）
+  const b=bindState.bindings.find(x=>x.id===bid);
+  if(b){
+    if(bindState.submitting.has(bid)){toast("正在提交上传，请稍候再扫描");return;}
+    if((b.inFlightCount||0)>0){toast("有 "+(b.inFlightCount||0)+" 个文件正在上传，请等待完成后再扫描");return;}
+  }
   try{await api("/api/bindings/scan",{body:{id:bid}});toast("已开始扫描");
     // 轮询扫描状态
     let tries=0;
@@ -2652,18 +2662,23 @@ function paintSubBar(wrap,st){
 function refreshBindingActions(bid){
   const card=document.querySelector('.bcard[data-bid="'+bid+'"]');
   if(!card)return;
-  const busy=bindState.submitting.has(bid);
+  const b=bindState.bindings.find(x=>x.id===bid);
+  const submitting=bindState.submitting.has(bid);
+  const uploading=!!(b&&(b.inFlightCount||0)>0);
+  const busy=submitting||uploading;
+  const busyTip=submitting?"正在提交上传，请稍候":
+    (uploading?"正在上传 "+(b.inFlightCount||0)+" 个文件，请等待完成后再扫描":"");
   const BLOCKED=["一键上传","上传","上传选中","全部上传","扫描"];
   card.querySelectorAll("button").forEach(btn=>{
     const label=(btn.dataset.subLabel||btn.textContent||"").trim();
     if(busy&&BLOCKED.indexOf(label)>=0){
       btn.dataset.subLabel=label;     // 记下原文案，结束后还原
       btn.disabled=true;
-      btn.title="正在提交上传，请稍候";
+      btn.title=busyTip;
       if(label==="一键上传"){
         btn.innerHTML='<span class="spin" style="width:10px;height:10px;border-width:1.5px"></span> 提交中';
       }else{
-        btn.textContent=(label==="扫描")?"提交中…":"提交中";
+        btn.textContent=(label==="扫描")?(submitting?"提交中…":"上传中…"):"提交中";
       }
     }else if(!busy&&btn.dataset.subLabel){
       btn.disabled=false;
@@ -2737,7 +2752,7 @@ function stopProgressPoll(bid){
 $("btnNewBinding").onclick=()=>openBindForm(null);
 $("btnScanAll").onclick=async()=>{
   try{const d=await api("/api/bindings/scan-all",{body:{}});
-    toast("已开始扫描 "+d.started+" 个同步");
+    toast(d.skipped?("已开始扫描 "+d.started+" 个同步，"+(d.skipped)+" 个因上传中/扫描中已跳过"):"已开始扫描 "+d.started+" 个同步");
     setTimeout(loadBindings,2000);
   }catch(e){toast(e.message);}
 };
@@ -3026,7 +3041,9 @@ $("btnSaveCfg").onclick=async()=>{
   }catch(e){$("cfgMsg").textContent="保存失败："+e.message;}
 };
 $("btnManualScan").onclick=async()=>{
-  try{await api("/api/bindings/scan-all",{body:{}});toast("已触发全部同步扫描");loadBindings();}
+  try{const d=await api("/api/bindings/scan-all",{body:{}});
+    toast(d.skipped?("已触发扫描 "+d.started+" 个同步，"+(d.skipped)+" 个因上传中/扫描中已跳过"):"已触发全部同步扫描");
+    loadBindings();}
   catch(e){toast("扫描失败："+e.message);}
 };
 $("btnViewLog").onclick=()=>{

@@ -1515,15 +1515,18 @@ class AppHandler(BaseHTTPRequestHandler):
     def h_bindings_scan(self, query, body):
         binding_id = body.get("id") or ""
         store = self.ctx.bindings()
-        if not store.get_binding(binding_id):
-            raise ApiError("绑定不存在", 404)
+        ok, reason = store.can_scan(binding_id)
+        if not ok:
+            if reason == "绑定不存在":
+                raise ApiError("绑定不存在", 404)
+            raise ApiError(reason)
         store.start_scan(binding_id)
         self._json({"ok": True})
 
     def h_bindings_scan_all(self, query, body):
         store = self.ctx.bindings()
-        count = store.scan_all()
-        self._json({"ok": True, "started": count})
+        started, skipped = store.scan_all()
+        self._json({"ok": True, "started": started, "skipped": skipped})
 
     def h_bindings_upload(self, query, body):
         binding_id = body.get("id") or ""
