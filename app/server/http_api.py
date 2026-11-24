@@ -34,6 +34,7 @@ import openlist
 import upload_queue
 import download_queue
 import bindings as bindings_mod
+import transfer_records
 import verify as verify_mod
 
 MAX_BODY_BYTES = 8 * 1024 * 1024        # 接口的 JSON 请求体上限（文件内容走流式，不经过这里）
@@ -225,7 +226,7 @@ def _local_roots_norm(roots):
 
 
 def _copy_pairs(raw, limit=20000):
-    """把复制请求里的 `items` 归一成 `[(源, 目标)]`，目标为空串表示"平铺进 target"。
+    """把复制请求里的 `items` 归一成 `[(源, 目标, 附加信息)]`，目标为空串表示"平铺进 target"。
 
     两种形态：
 
@@ -233,6 +234,10 @@ def _copy_pairs(raw, limit=20000):
       比对结果的相对层级是比对语义的一部分，只给一个"目标目录"的话，服务端
       只能把条目按名字平铺进去，`sub/dir/file` 会变成 `目标根/file`。
     * 字符串 —— 旧形态，配 `target` 用，按名字平铺进 `target`。
+
+    第三项 `extra` 是**可选**的 `{"size", "isDir"}`：前端从比对结果里带过来，
+    让「同步完成的复制」（不产生任务的那两条链路）也能在传输列表里显示真实大小
+    与"这是目录"。缺字段时它就是个空 dict，行为与旧版一致。
     """
     if isinstance(raw, str):
         raw = [raw]
@@ -243,11 +248,13 @@ def _copy_pairs(raw, limit=20000):
         if isinstance(item, dict):
             src = str(item.get("src") or item.get("path") or "").strip()
             dst = str(item.get("dst") or "").strip()
+            extra = {"size": item.get("size"), "isDir": bool(item.get("isDir"))}
         else:
             src, dst = str(item or "").strip(), ""
+            extra = {"size": None, "isDir": False}
         if not src:
             continue
-        out.append((src, dst))
+        out.append((src, dst, extra))
         if len(out) >= limit:
             break
     return out
@@ -365,6 +372,185 @@ def _task_ids(data):
     return out
 
 
+def _size_of(extra):
+    """从 `_copy_pairs` 的附加信息里取大小；拿不到就给 0（前端显示「—」）。"""
+    try:
+        return max(0, int((extra or {}).get("size") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _local_record(src, dst, extra, error="", is_dir=None):
+    """构造一条**本地复制**传输记录。
+
+    目录按一条记，`size` 记 0，`isDir=True` —— 前端据此显示「目录」而不是
+    「0 B / 0 B」。文件的大小优先信调用方给的（比对结果里带过来的），
+    没有就现取（复制已经成功了，这一次 stat 不会失败到影响结果）。
+    """
+    dir_flag = bool(os.path.isdir(src) and not os.path.islink(src)) \
+        if is_dir is None else bool(is_dir)
+    size = 0
+    if not dir_flag:
+        size = _size_of(extra)
+        if not size:
+            try:
+                size = int(os.path.getsize(dst))
+            except OSError:
+                size = 0
+    return {
+        "kind": transfer_records.KIND_LOCAL,
+        "name": os.path.basename(str(src).rstrip(os.sep)) or str(src),
+        "srcPath": str(src),
+        "dstPath": str(dst),
+        "size": size,
+        "isDir": dir_flag,
+        "status": (transfer_records.FAILED if error else transfer_records.DONE),
+        "error": error or "",
+    }
+
+
+# 传输列表下发的 OpenList 任务 id 前缀（与 openlist 任务表里的裸 tid 区分开）
+OL_TASK_ID_PREFIX = "ol_"
+
+# 传输列表**当前真正会展示**的 OpenList 任务类型（见 h_openlist_tasks，只聚合 copy）。
+# 「全部取消」「全部重试」一律按这个常量来，绝不按 openlist.TASK_TYPES 全量——
+# 用户屏幕上根本看不到的类型，不该被一次「全部取消」停掉：那不是"取消全部"，
+# 那是"顺手把别人/别的应用的任务也停了"，而用户连它们的存在都不知道。
+#
+# ⚠️ 这一项必须与 h_openlist_tasks 的聚合范围**同步改**：等 R05 把 upload/move
+# 聚合进列表（前端加 taskType 标签）时，这里才跟着扩成 ("copy", "upload", ...)。
+# 两步必须一起改，只改一边等于让"所见即所取消"再次失效。
+VISIBLE_TASK_TYPES = ("copy",)
+
+
+def split_openlist_task_id(raw, task_type=None):
+    """把前端给的 OpenList 任务 id 拆成 `(tid, type)`。
+
+    前端沿用 `ol_<tid>` 约定（与 `/api/openlist/tasks` 下发的 id 完全一致），
+    也接受裸 tid（手动排障时方便）。type 只认 `copy` / `upload`，认不出来就返回
+    None —— 由调用方逐个类型试，前端不必关心任务类型。
+
+    这里刻意用 `openlist.TASK_TYPES`（**不是** VISIBLE_TASK_TYPES）：单条接口
+    面对的是"用户拿着一个 id 让你对这一个任务动手"，多试几个类型只会更准，
+    而且将来列表扩类型时前端不用跟着改。
+    """
+    task_id = str(raw or "").strip()
+    if task_id.startswith(OL_TASK_ID_PREFIX):
+        task_id = task_id[len(OL_TASK_ID_PREFIX):]
+    kind = str(task_type or "").strip().lower()
+    if kind not in openlist.TASK_TYPES:
+        kind = None
+    return task_id, kind
+
+
+def _task_buckets(client, task_type):
+    """拉一次某类任务，返回 `(undone tid 列表, done 的 {tid: state}, 是否成功)`。
+
+    回读核验**必须同时看 undone 和 done**：任务离开 undone 有两种可能 —— 被取消
+    （state=4），或者在这几秒里自己跑完了（state=2 成功 / state=7 失败）。
+    旧口径 `cancelled = requested - len(undone)` 会把后者也算成"已取消"，
+    于是"点了全部取消，正好有任务跑完"时会报出假的取消数。这里把两种结局分开。
+    """
+    data = client.list_tasks(task_type)
+    if data is None:
+        return [], {}, False
+    ids, done = [], {}
+    for task in data.get("undone") or []:
+        if isinstance(task, dict) and task.get("id"):
+            ids.append(str(task["id"]))
+    for task in data.get("done") or []:
+        if isinstance(task, dict) and task.get("id"):
+            try:
+                done[str(task["id"])] = int(task.get("state") or 0)
+            except (TypeError, ValueError):
+                done[str(task["id"])] = 0
+    return ids, done, True
+
+
+def _cancel_openlist_undone(client, log=None):
+    """取消传输列表**可见类型**（`VISIBLE_TASK_TYPES`）的全部未完成任务，并回读核验。
+
+    返回报告 dict：
+
+    ```
+    {"requested", "cancelled", "finished", "remaining", "byType": {...}, "error"}
+    ```
+
+    流程（每一步都不能省，省了就退回"点了没反应/谎报成功"）：
+
+    1. 拉 undone 拿 tid（只取 `VISIBLE_TASK_TYPES`，即用户屏幕上看得见的那些）；
+    2. 批量取消，解析 per-tid 结果；
+    3. **回读 undone + done** —— 离开 undone 不等于"被取消"，还要看 done 里的
+       state 是不是 4(canceled)；state 2/7 是这期间自己跑完的，单列 `finished`；
+    4. 对残留逐条兜底，再回读一次，剩余的条数如实返回。
+
+    `cancelled` 只数「回读后 done 里 state=4 的 tid」，不是"请求发出去几条"，
+    也不是"不在 undone 里的条数"。
+    """
+    log = log or (lambda *a, **k: None)
+    report = {"requested": 0, "cancelled": 0, "finished": 0, "remaining": 0,
+              "byType": {}, "error": ""}
+    for task_type in VISIBLE_TASK_TYPES:
+        detail = {"requested": 0, "cancelled": 0, "finished": 0,
+                  "remaining": 0, "failed": [], "error": ""}
+        tids, _, ok = _task_buckets(client, task_type)
+        detail["requested"] = len(tids)
+        if not ok:
+            detail["error"] = "查询任务列表失败"
+            report["byType"][task_type] = detail
+            continue
+        if not tids:
+            report["byType"][task_type] = detail
+            continue
+
+        batch = client.cancel_tasks(tids, task_type)
+        detail["failed"] = list(batch.get("failed") or [])
+
+        residual, done_after, after_ok = _task_buckets(client, task_type)
+        if not after_ok:
+            # 拿不到回读结果 → 只能给批量接口的结论，并明确标「未核实」
+            detail["cancelled"] = int(batch.get("ok") or 0)
+            detail["remaining"] = max(0, len(tids) - int(batch.get("ok") or 0))
+            detail["error"] = "取消后无法回读任务列表，残留数未核实"
+            report["byType"][task_type] = detail
+            continue
+
+        if residual:
+            # 批量接口没给逐条结果、或对某些 tid 报错 → 逐条再取消一次。
+            # 单条接口的返回语义清楚得多，是最后一道保险。
+            for tid in residual:
+                if client.cancel_task(tid, task_type):
+                    continue
+                detail["failed"].append({"id": tid, "error": "逐条取消失败"})
+            final, final_done, final_ok = _task_buckets(client, task_type)
+            if final_ok:
+                residual = final
+                done_after = final_done
+
+        detail["remaining"] = len(residual)
+        # 只认 done 里明确标成 canceled(4) 的才算"被我们停下"；
+        # 2(succeeded)/7(failed) 是这期间自己结束的，不能记到取消头上。
+        for tid in tids:
+            if tid in residual:
+                continue
+            state = done_after.get(tid, -1)
+            if state == 4:
+                detail["cancelled"] += 1
+            elif state in (2, 7):
+                detail["finished"] += 1
+        if detail["remaining"]:
+            log("OpenList %s 任务取消后仍有 %d 个未停下"
+                % (task_type, detail["remaining"]))
+        report["byType"][task_type] = detail
+        report["requested"] += detail["requested"]
+        report["cancelled"] += detail["cancelled"]
+        report["finished"] += detail["finished"]
+        report["remaining"] += detail["remaining"]
+        if detail.get("error") and not report["error"]:
+            report["error"] = detail["error"]
+    return report
+
+
 # 可以通过接口修改的配置项及其约束。
 # 之前这里是完全开放的：并发数能填 999（真起 999 个线程）、
 # scanDepth 能填 "abc"（写进配置后每次读取都崩）、
@@ -450,11 +636,14 @@ class AppContext(object):
     def __init__(self, app_name):
         self.app_name = app_name
         self.log = lambda *a, **k: None
+        # 网关 socket 探活发现「已有实例在跑」时置 True，main 据此直接退出
+        self.single_instance_conflict = False
         self._store = None
         self._client = None
         self._queue = None
         self._downloads = None
         self._bindings = None
+        self._records = None
         # 惰性单例的初始化锁。HTTP 服务是多线程的，首屏会并发打
         # /api/status、/api/config、/api/bindings 等，不加锁会造出
         # 两份 UploadQueue / BindingStore，同一批任务并发执行、互相覆盖落盘。
@@ -510,6 +699,18 @@ class AppContext(object):
         接口必须先判断 id 属于哪一个 —— 打错队列只会得到"任务不存在"。
         """
         return (self.queue(), self.downloads())
+
+    def records(self):
+        """传输记录（本地复制 / 同存储云端复制的回执）。
+
+        这两条链路不产生队列任务也不产生 OpenList 任务，不单独记录的话
+        传输列表里就什么都看不到（BUG-3）。
+        """
+        if self._records is None:
+            with self._init_lock:
+                if self._records is None:
+                    self._records = transfer_records.TransferRecordStore(log=self.log)
+        return self._records
 
     def find_transfer(self, task_id):
         """按任务 id 找到它所属的队列。返回 (queue, task) 或 (None, None)。"""
@@ -567,10 +768,15 @@ class AppContext(object):
 
         重建前记下「是否暂停」，重建后原样恢复 —— 否则用户暂停了队列、
         再去改一下并发数，队列会自己跑起来。
+
+        顺序很关键：**先停完再置空**。早先是「锁内先置空、锁外再 stop」，
+        于是 stop 里的 join 超时（worker 卡在长请求）时，旧 worker 还活着，
+        新队列已经拿着同一份 queue.json 起来了 —— 两个队列各有一份任务列表，
+        谁最后 save 谁覆盖对方。现在只要有一个 worker 没退出就**报错拒绝重建**，
+        旧队列原样保留（认领表也不动）。
         """
-        # stop() 内部会逐 worker join(timeout=5)，若在 _init_lock 内调用，
-        # worker 跑慢请求时锁被占用最坏 10 秒，所有 HTTP 请求全部阻塞。
-        # 所以先在锁内取出引用并置空，stop() 放到锁外执行。
+        # stop() 内部要 join worker，若在 _init_lock 内调用会挡住所有请求，
+        # 所以锁内只取引用，stop() 放到锁外执行。
         old_queue = None
         old_downloads = None
         was_paused = False
@@ -581,21 +787,35 @@ class AppContext(object):
                 except Exception:
                     was_paused = False
                 old_queue = self._queue
-                self._queue = None
             if self._downloads is not None:
                 old_downloads = self._downloads
-                self._downloads = None
+
         # 锁外 stop：join worker 不阻塞其他请求
-        if old_queue is not None:
+        for label, old in (("上传", old_queue), ("下载", old_downloads)):
+            if old is None:
+                continue
             try:
-                old_queue.stop()
-            except Exception:
-                pass
-        if old_downloads is not None:
-            try:
-                old_downloads.stop()
-            except Exception:
-                pass
+                stopped = old.stop()
+            except Exception as exc:
+                self.log("重建队列时停止%s队列失败：%s" % (label, exc))
+                stopped = True
+            if stopped is False:
+                # 老队列没能全停：撤回归档，让它继续干活。
+                # 不撤的话 self._queue 指向一个"已收到停止信号、worker 正在退出"的
+                # 队列，之后新任务能入队却永远没人处理（表现是"上传一直排队不动"）。
+                # 直接 start() 会 clear 掉 _stop，并把还在跑的 worker 也纳入同一份
+                # 任务列表（同一个对象、同一把锁，不存在两个队列各写一份文件的问题）。
+                try:
+                    old._workers = []
+                    old.start(workers=1)
+                except Exception:
+                    pass
+                raise ApiError("%s队列仍有任务没停下来，改并发数需要它们先退出，"
+                               "请稍后重试" % label)
+
+        with self._init_lock:
+            self._queue = None
+            self._downloads = None
         # bindings 持有旧 queue 引用，下次 bindings() 时会重新关联
         if was_paused:
             try:
@@ -603,6 +823,39 @@ class AppContext(object):
                 self.downloads().set_paused(True)
             except Exception:
                 pass
+
+
+def _tail_lines(path, n, block=64 * 1024):
+    """从文件尾部读最近 n 行（不把整份日志读进内存）。
+
+    `readlines()[-n:]` 是整文件读入再切片：NAS 上 info.log 长期不轮转会到
+    几十 MB，而前端日志面板每 3 秒拉一次 —— 峰值内存与磁盘读都被放大成
+    「页面开着的时候一直读整份文件」。这里从尾部按块回退，够 n 行就停。
+    """
+    try:
+        fh = open(path, "rb")
+    except OSError:
+        return []                      # 日志还没生成 / 刚被轮转走，当空处理
+    with fh:
+        fh.seek(0, os.SEEK_END)
+        size = fh.tell()
+        if size <= 0:
+            return []
+        chunk = max(block, n * 160)
+        lines = []
+        while True:
+            start = max(0, size - chunk)
+            fh.seek(start)
+            data = fh.read(size - start)
+            lines = data.split(b"\n")
+            if start > 0:
+                lines = lines[1:]      # 块首那个半行不要
+            if lines and lines[-1] == b"":
+                lines.pop()            # 文件以 \n 结尾时 split 会多一个空串
+            if start == 0 or len(lines) >= n:
+                break
+            chunk *= 2
+    return [ln.decode("utf-8", "replace").rstrip("\r") for ln in lines[-n:]]
 
 
 # --------------------------------------------------------------------------
@@ -656,6 +909,12 @@ class AppHandler(BaseHTTPRequestHandler):
         except ValueError:
             length = 0
         if length <= 0:
+            # 没 Content-Length 却有 chunked：http.server 不会解 chunked，
+            # 当成 {} 继续执行等于"静默把请求体丢掉"，接口会拿空参数往下跑
+            # （比如取消任务时报"任务不存在"而不是明确拒绝）。
+            if "chunked" in (self.headers.get("Transfer-Encoding") or "").lower():
+                self.close_connection = True
+                raise ApiError("不支持 chunked 请求体，请带 Content-Length", 411)
             return {}
         if length > MAX_BODY_BYTES:
             # 拒绝超大请求体时必须排空并关连接，否则 keep-alive 会把残留字节
@@ -697,6 +956,19 @@ class AppHandler(BaseHTTPRequestHandler):
 
         handler = self._resolve_handler(method, route)
         if handler is None:
+            # 未知路由也必须先把请求体读掉。POST 带 body 时直接回 404 会让残留
+            # 字节留在连接里，keep-alive 的下一行请求被拼上这段 JSON ——
+            # 实测同一条连接上后续请求变成 400 Bad request syntax，
+            # 用户看到的是"点了没反应 / 整页接口全挂"（多见于前端缓存了旧版页面，
+            # 还在调已下线的接口）。
+            if method == "POST":
+                try:
+                    drained = self._read_body()
+                except ApiError as exc:
+                    self._error(exc.message, exc.status)
+                    return
+                if drained is None:      # 413 已响应
+                    return
             self._error("接口不存在：%s %s" % (method, route), 404)
             return
 
@@ -979,7 +1251,12 @@ class AppHandler(BaseHTTPRequestHandler):
     # -- 对比 --
 
     def h_cloud_copy(self, query, body):
-        """OpenList 服务端复制：srcDir 下的 names 复制到 dstDir。"""
+        """OpenList 服务端复制：srcDir 下的 names 复制到 dstDir。
+
+        跨存储时服务端会建后台任务，同存储时**同步完成**（响应里没有 tasks）。
+        两种情况的回执都要给：`tasks` 交给传输列表轮询，同步完成的那些落一条
+        `olc_` 传输记录 —— 否则用户点了复制，传输列表里空空如也。
+        """
         src_dir = normalize_cloud((body.get("srcDir") or "").strip())
         dst_dir = normalize_cloud((body.get("dstDir") or "").strip())
         names = body.get("names") or []
@@ -990,8 +1267,37 @@ class AppHandler(BaseHTTPRequestHandler):
         names = [str(n) for n in names if str(n).strip()]
         if not names:
             raise ApiError("names 为空")
-        self.ctx.client().copy(src_dir, dst_dir, names)
-        self._json({"ok": True, "copied": len(names)})
+        data = self.ctx.client().copy(src_dir, dst_dir, names)
+        tasks = _task_ids(data)
+        if not tasks:
+            self._record_cloud_copies([(src_dir, dst_dir, name, None, False)
+                                       for name in names])
+        self._json({"ok": True, "copied": len(names), "tasks": tasks,
+                    "failed": []})
+
+    def _record_cloud_copies(self, entries):
+        """给「同步完成的云端复制」落传输记录。
+
+        `entries` 每项是 `(src_dir, dst_dir, name, size, isDir)`。
+        只在 OpenList **没有**建后台任务时调用 —— 有任务的复制由 OpenList 自己
+        在传输列表里报告状态，再记一份就重复了。
+        """
+        records = []
+        for src_dir, dst_dir, name, size, is_dir in entries:
+            src = join_cloud(src_dir, name)
+            records.append({
+                "kind": transfer_records.KIND_CLOUD,
+                "name": name,
+                "srcPath": src,
+                "dstPath": join_cloud(dst_dir, name),
+                "size": size,
+                "isDir": bool(is_dir),
+                "status": transfer_records.DONE,
+            })
+        if records:
+            self.ctx.records().add_many(records)
+            self.ctx.log("已记录 %d 项云端同步复制（无后台任务）" % len(records))
+        return records
 
     def h_compare(self, query, body):
         """双向比对：**两侧各自可以是本地或云端**。
@@ -1057,7 +1363,7 @@ class AppHandler(BaseHTTPRequestHandler):
         if not pairs:
             raise ApiError("没有指定要复制的内容")
         # 只有"没带落点"的条目才需要 target；全都带了 dst 时它就是个多余参数。
-        if not target and any(not dst for _, dst in pairs):
+        if not target and any(not dst for _, dst, _ in pairs):
             raise ApiError("缺少 target（目标目录）")
 
         if side == SOURCE_CLOUD:
@@ -1074,7 +1380,7 @@ class AppHandler(BaseHTTPRequestHandler):
         target_dir = normalize_cloud(target) if target else ""
         groups = {}
         failed = []
-        for raw_src, raw_dst in pairs:
+        for raw_src, raw_dst, extra in pairs:
             src = normalize_cloud(raw_src)
             if src == "/":
                 # 复制根目录等于把整个存储再拷一份，必然是误操作
@@ -1094,29 +1400,45 @@ class AppHandler(BaseHTTPRequestHandler):
                     continue
             else:
                 dst_dir = target_dir
-            groups.setdefault((src_dir or "/", dst_dir or "/"), []).append((src_name, src))
+            groups.setdefault((src_dir or "/", dst_dir or "/"), []).append(
+                (src_name, src, extra))
 
         client = self.ctx.client()
         copied, tasks = 0, []
+        # 同步完成（OpenList 不建后台任务）的复制，回执落到传输记录里 ——
+        # 否则这些复制在传输列表里没有任何痕迹（BUG-3）。
+        sync_copies = []
         for (src_dir, dst_dir), members in groups.items():
-            names = [n for n, _ in members]
+            names = [n for n, _, _ in members]
             try:
                 data = client.copy(src_dir, dst_dir, names, overwrite=True)
                 copied += len(names)
-                tasks.extend(_task_ids(data))
+                task_ids = _task_ids(data)
+                tasks.extend(task_ids)
+                if not task_ids:
+                    for name, _path, extra in members:
+                        sync_copies.append((src_dir, dst_dir, name,
+                                            _size_of(extra),
+                                            bool((extra or {}).get("isDir"))))
             except openlist.OpenlistError as exc:
                 # 整组失败 → 退化成逐条重试：一个条目出错（目标被权限锁住、
                 # 名字非法…）不该让同组其它条目陪葬；而且只有逐条才知道是谁失败。
                 self.ctx.log("[api] 云端复制整组失败（%s → %s），改为逐条重试：%s"
                              % (src_dir, dst_dir, exc))
-                for name, path in members:
+                for name, path, extra in members:
                     try:
                         data = client.copy(src_dir, dst_dir, [name], overwrite=True)
                         copied += 1
-                        tasks.extend(_task_ids(data))
+                        task_ids = _task_ids(data)
+                        tasks.extend(task_ids)
+                        if not task_ids:
+                            sync_copies.append((src_dir, dst_dir, name,
+                                                _size_of(extra),
+                                                bool((extra or {}).get("isDir"))))
                     except openlist.OpenlistError as exc2:
                         failed.append({"path": path, "error": str(exc2)})
 
+        self._record_cloud_copies(sync_copies)
         self.ctx.log("已在云端复制 %d 项（落点：%s）"
                      % (copied, target_dir or "各自的原路径"))
         self._json({"ok": True, "side": SOURCE_CLOUD, "target": target_dir,
@@ -1130,7 +1452,13 @@ class AppHandler(BaseHTTPRequestHandler):
         # 两趟走：**先把能判的错全判完，再动文件系统**。目标是源的子目录这种
         # 误操作一旦先建了目录，用户会凭空多出一个空文件夹，还得自己去删。
         plans, failed = [], []
-        for raw_src, raw_dst in pairs:
+        # 传输记录：本地复制**不产生任何队列/后台任务**，不记就什么都看不到（BUG-3）。
+        # 只在**真的进入复制阶段**之后才落记录 —— 预检挡下的条目（源不存在、源即
+        # 目标、目标是源子目录、越界、复制存储根目录）只写日志：它们是"参数不对"，
+        # 不是"复制失败了"，而且反复误操作会迅速填满 500 条上限，把真正的成功
+        # 记录挤掉。这些错误已经通过 `failed` 逐条回给前端（弹层里列得清清楚楚）。
+        records = []
+        for raw_src, raw_dst, extra in pairs:
             src = os.path.abspath(str(raw_src))
             # 落点：带 dst 就**精确落位**（比对场景，相对层级必须保住），
             # 否则沿用旧的"按名字放进 target 目录"。
@@ -1160,32 +1488,44 @@ class AppHandler(BaseHTTPRequestHandler):
                     failed.append({"path": src, "error":
                                    "目标目录在源目录内部，会无限自我复制"})
                     continue
-            plans.append((src, dst))
+            plans.append((src, dst, extra))
+
+        if failed:
+            # 预检失败只留痕在日志里（前端已经从 failed 里拿到逐条原因）
+            self.ctx.log("本地复制预检跳过 %d 项：%s"
+                         % (len(failed), failed[0].get("error", "")))
 
         copied = 0
         if plans:
             try:
                 # 落点按相对层级分散在不同目录里 → 逐个建父目录（去重后建）。
-                for parent in sorted({os.path.dirname(d) for _, d in plans}):
+                for parent in sorted({os.path.dirname(d) for _, d, _ in plans}):
                     os.makedirs(parent, exist_ok=True)
             except OSError as exc:
                 raise ApiError("创建目标目录失败：%s" % exc)
-            for src, dst in plans:
+            for src, dst, extra in plans:
                 try:
-                    if os.path.isdir(src) and not os.path.islink(src):
+                    is_dir = os.path.isdir(src) and not os.path.islink(src)
+                    if is_dir:
                         # dirs_exist_ok：目标已有同名目录时**合并**进去而不是报错 ——
                         # 与云端 copy(overwrite=True) 的语义对齐（同名覆盖，其余保留）。
                         shutil.copytree(src, dst, dirs_exist_ok=True)
                     else:
                         shutil.copy2(src, dst)
                     copied += 1
+                    records.append(_local_record(src, dst, extra, "", is_dir=is_dir))
                 except (OSError, shutil.Error) as exc:
                     failed.append({"path": src, "error": str(exc)})
+                    records.append(_local_record(src, dst, extra, str(exc)))
 
+        if records:
+            self.ctx.records().add_many(records)
         self.ctx.log("已在本地复制 %d 项（落点：%s）"
                      % (copied, target_dir or "各自的原路径"))
+        # `tasks` 恒为空：本地复制不产生任何后台任务（保留字段是为了响应形状统一）
         self._json({"ok": True, "side": SOURCE_LOCAL, "target": target_dir,
-                    "copied": copied, "failed": failed, "tasks": []})
+                    "copied": copied, "failed": failed, "tasks": [],
+                    "records": len(records)})
 
     # -- 差异清理：删除多余文件（不可逆）--
 
@@ -1388,15 +1728,28 @@ class AppHandler(BaseHTTPRequestHandler):
             tasks = tasks + self.ctx.downloads().list()
         except Exception as exc:
             self.ctx.log("[api] 合并下载任务失败：%r" % (exc,))
+        # 「传输记录」：本地复制 / 同存储云端复制这两条链路既不进队列也没有
+        # OpenList 任务，不合并进来传输列表就一片空白（BUG-3：本地传本地看不到）。
+        try:
+            tasks = tasks + self.ctx.records().list()
+        except Exception as exc:
+            self.ctx.log("[api] 合并传输记录失败：%r" % (exc,))
         self._json({"ok": True, "tasks": tasks, "counts": q.counts(),
                     "paused": q.is_paused(),
                     "pausedDownload": self.ctx.downloads().is_paused()})
 
     def h_upload_retry(self, query, body):
-        # 一键重试所有失败任务：body {"all": true}
+        # 一键重试：**本地两条队列 + OpenList 两类任务的失败项**。
+        # 旧实现只重试本地队列，而「全部重试」按钮的显示条件算的是合并后的失败数
+        # —— 于是「本地 0 失败 + OpenList 有失败」时按钮会出现，点下去却什么都不
+        # 会重试，这正是用户报的「缺少全部重试失败项按钮」。
         if body.get("all"):
             retried = self.ctx.queue().retry_all() + self.ctx.downloads().retry_all()
-            self._json({"ok": True, "retried": retried})
+            ol = self._retry_openlist_failed()
+            self._json({"ok": True, "retried": retried,
+                        "openlistRetried": ol["retried"],
+                        "openlistRetriedKnown": ol["known"],
+                        "openlistTypes": ol["byType"]})
             return
         # 单条重传：body {"id": "..."}（任务不存在仍 404）
         queue, task = self.ctx.find_transfer(body.get("id") or "")
@@ -1411,15 +1764,31 @@ class AppHandler(BaseHTTPRequestHandler):
         self._json({"ok": True, "task": queue.cancel(task["id"])})
 
     def h_upload_remove(self, query, body):
-        queue, task = self.ctx.find_transfer(body.get("id") or "")
+        task_id = str(body.get("id") or "").strip()
+        if not task_id:
+            raise ApiError("缺少任务 id")
+        # 传输记录（本地复制 / 同存储云端复制）不在任何队列里，先按 id 找记录。
+        # 记录 id 前缀 lc_ / olc_ 与队列任务 id 不冲突，按"先记录后队列"找不会误删。
+        try:
+            if self.ctx.records().remove(task_id):
+                self._json({"ok": True, "record": True})
+                return
+        except Exception as exc:
+            self.ctx.log("[api] 删除传输记录失败：%r" % (exc,))
+        queue, task = self.ctx.find_transfer(task_id)
         if not queue:
             raise ApiError("任务不存在", 404)
         queue.remove(task["id"])
         self._json({"ok": True})
 
     def h_upload_clear(self, query, body):
-        # 清除本地队列已结束 + OpenList 已完成任务
-        removed = self.ctx.queue().clear_done() + self.ctx.downloads().clear_done()
+        # 清除本地队列已结束 + 传输记录 + OpenList 已完成任务
+        local_removed = self.ctx.queue().clear_done() + self.ctx.downloads().clear_done()
+        records_removed = 0
+        try:
+            records_removed = self.ctx.records().clear_terminal()
+        except Exception as exc:
+            self.ctx.log("清除传输记录失败：%s" % exc)
         ol_cleared = False
         try:
             client = self.ctx.client()
@@ -1427,47 +1796,140 @@ class AppHandler(BaseHTTPRequestHandler):
                 ol_cleared = client.clear_done_tasks()
         except Exception as exc:
             self.ctx.log("清除 OpenList 已完成任务失败：%s" % exc)
-        self._json({"ok": True, "removed": removed, "openlistCleared": ol_cleared})
+        self._json({"ok": True, "removed": local_removed + records_removed,
+                    "localRemoved": local_removed,
+                    "recordsRemoved": records_removed,
+                    "openlistCleared": ol_cleared})
 
     def h_upload_pause(self, query, body):
+        """暂停 / 恢复。
+
+        **只作用于本地队列**：OpenList 没有「暂停」能力，只有「取消」。
+        旧实现在暂停时顺手把 OpenList 排队中的任务取消掉了 —— 暂停于是变成
+        不可逆（恢复后那些任务再也回不来，文件少了一批），用户看到的就是
+        「暂停没生效 / 恢复后东西少了」。这个副作用已去掉，前端的 toast 也会
+        明确说明「OpenList 任务不支持暂停，要停请用全部取消」。
+        """
         paused = bool(body.get("paused"))
         # 一个按钮管两条队列：用户点「全部暂停」时不会去想"上传和下载是两回事"
         self.ctx.queue().set_paused(paused)
         self.ctx.downloads().set_paused(paused)
-        # OpenList 没有「暂停」概念，只有取消。暂停时取消排队中的任务（state=0），
-        # 正在运行的（state=1）让它跑完 —— 语义上等同于本地队列的"不再开始新任务"。
-        ol_pending_cancelled = 0
-        if paused:
-            try:
-                client = self.ctx.client()
-                if client:
-                    tasks = client.list_tasks("copy")
-                    if tasks:
-                        pending_ids = [t.get("id") for t in tasks.get("undone", [])
-                                       if isinstance(t, dict) and int(t.get("state") or 0) == 0]
-                        if pending_ids:
-                            ol_pending_cancelled = client.cancel_tasks(pending_ids)
-            except Exception as exc:
-                self.ctx.log("暂停时取消 OpenList 排队任务失败：%s" % exc)
         self._json({"ok": True, "paused": paused,
-                    "openlistPendingCancelled": ol_pending_cancelled})
+                    "pausedDownload": self.ctx.downloads().is_paused(),
+                    # 明确告诉前端：暂停对 OpenList 无效（别在文案里承诺做不到的事）
+                    "openlistPausable": False})
 
     def h_upload_cancel_all(self, query, body):
-        # 取消本地队列任务 + OpenList 所有未完成任务
-        n = self.ctx.queue().cancel_all() + self.ctx.downloads().cancel_all()
-        ol_cancelled = 0
+        """取消全部：本地两条队列 + OpenList 里**传输列表可见类型**的未完成项。
+
+        四件必须做对的事（缺一条都会退回"点了没反应 / 谎报成功"）：
+
+        1. **按类型取任务**：`/api/task/<type>/undone` 是按类型分段的，类型取错
+           就一个都取消不到。取哪些类型由 `VISIBLE_TASK_TYPES` 决定 —— 只动
+           用户在传输列表里看得见的那类，绝不按 `openlist.TASK_TYPES` 全量去扫；
+        2. **回读验证**：批量接口 HTTP 200 不代表成功（见
+           `openlist.parse_batch_errors`），取消完必须再拉一次 undone 才知道
+           到底停了没有；
+        3. **逐条兜底**：残留的任务逐个用单条接口再取消一次 —— 批量接口对
+           「不存在的 tid」只会在 data 里静静写一句错误；
+        4. **如实回报**：残留几个就说几个，绝不按"请求发成功了"算成功数。
+
+        另外 `cancel_all()` 会解除本地队列的暂停态：取消完最自然的下一步是
+        「重试」，而暂停态下 worker 根本不取任务，点了重试什么都不会发生。
+        """
+        was_paused = self.ctx.queue().is_paused() or self.ctx.downloads().is_paused()
+        local_cancelled = self.ctx.queue().cancel_all() + self.ctx.downloads().cancel_all()
+
+        report = {"requested": 0, "cancelled": 0, "finished": 0,
+                  "remaining": 0, "byType": {}}
         try:
             client = self.ctx.client()
-            if client:
-                tasks = client.list_tasks("copy")
-                if tasks:
-                    undone_ids = [t.get("id") for t in tasks.get("undone", [])
-                                  if isinstance(t, dict) and t.get("id")]
-                    if undone_ids:
-                        ol_cancelled = client.cancel_tasks(undone_ids)
+            if client.is_configured():
+                report = _cancel_openlist_undone(client, self.ctx.log)
         except Exception as exc:
             self.ctx.log("取消 OpenList 任务失败：%s" % exc)
-        self._json({"ok": True, "cancelled": n, "openlistCancelled": ol_cancelled})
+            report["error"] = str(exc)
+
+        self._json({"ok": True, "cancelled": local_cancelled,
+                    "openlistCancelled": report.get("cancelled", 0),
+                    "openlistFinished": report.get("finished", 0),
+                    "openlistRequested": report.get("requested", 0),
+                    "openlistRemaining": report.get("remaining", 0),
+                    "openlistTypes": report.get("byType", {}),
+                    "openlistError": report.get("error", ""),
+                    # 本地队列的暂停态在这次操作里被解除了（前端据此提示）
+                    "unpaused": bool(was_paused and not self.ctx.queue().is_paused()),
+                    "paused": self.ctx.queue().is_paused()})
+
+    def _retry_openlist_failed(self):
+        """让 OpenList 重试**传输列表可见类型**里的失败项，返回分项计数。
+
+        与 cancel_all 同一条口径（`VISIBLE_TASK_TYPES`）：列表里看不到的任务类型，
+        「全部重试」也不替它做主。
+
+        单个类型失败（服务端不支持 / 网络抖动）静默跳过并记日志 —— 不能因为
+        某一类不可用就把整个「全部重试」判失败。
+
+        `retry_failed` 接口**不返回重试条数**，只能做「调用前后各数一次」的差；
+        任一侧拿不到列表就把 retried 置 None（前端如实说"条数无法核实"）。
+        """
+        out = {"retried": 0, "known": True, "byType": {}}
+        try:
+            client = self.ctx.client()
+        except Exception as exc:
+            self.ctx.log("重试 OpenList 失败项时取不到客户端：%s" % exc)
+            return {"retried": 0, "known": False, "byType": {}}
+        if not client.is_configured():
+            # 没连 OpenList 不是错误：本地队列照样重试过了
+            return {"retried": 0, "known": False, "byType": {}}
+        for task_type in VISIBLE_TASK_TYPES:
+            try:
+                result = client.retry_failed_tasks(task_type)
+            except Exception as exc:
+                self.ctx.log("重试 OpenList 失败项出错（%s）：%s" % (task_type, exc))
+                result = {"ok": False, "taskType": task_type, "retried": None,
+                          "error": str(exc)}
+            out["byType"][task_type] = result
+            if result.get("retried") is None:
+                out["known"] = False
+            else:
+                out["retried"] += int(result.get("retried") or 0)
+        return out
+
+    # -- OpenList 服务端任务：单条操作 --
+    # 传输列表里的 OpenList 行以前只有一个「OpenList 任务」文字标签，用户对这类
+    # 任务**一个按钮都没有**。这三个薄接口就是那三个按钮的落点。
+    # 沿用 `ol_<tid>` 的 id 约定；`type` 不给就 copy → upload 依次试，前端不必关心。
+
+    OPENLIST_TASK_ACTIONS = {"cancel": "取消", "retry": "重试", "delete": "删除"}
+
+    def h_openlist_task_cancel(self, query, body):
+        self._openlist_task_action("cancel", body)
+
+    def h_openlist_task_retry(self, query, body):
+        self._openlist_task_action("retry", body)
+
+    def h_openlist_task_delete(self, query, body):
+        self._openlist_task_action("delete", body)
+
+    def _openlist_task_action(self, action, body):
+        client = self.ctx.client()
+        if not client.is_configured():
+            raise ApiError("尚未连接 OpenList，无法操作服务端任务", status=401)
+        tid, task_type = split_openlist_task_id(body.get("id"), body.get("type"))
+        if not tid:
+            raise ApiError("缺少任务 id")
+        label = self.OPENLIST_TASK_ACTIONS.get(action, action)
+        types = [task_type] if task_type else list(openlist.TASK_TYPES)
+        for kind in types:
+            if client.task_action(action, tid, kind):
+                self.ctx.log("已%s OpenList %s 任务：%s" % (label, kind, tid))
+                self._json({"ok": True, "action": action, "id": tid,
+                            "type": kind, "count": 1})
+                return
+        # 全类型都失败 → 如实报错，别假装成功（任务可能已被服务端清理掉）
+        raise ApiError("OpenList 任务%s失败（任务可能已被清理或已结束）：%s"
+                       % (label, tid), 404)
 
     # -- 目录绑定 --
 
@@ -1542,6 +2004,12 @@ class AppHandler(BaseHTTPRequestHandler):
         store = self.ctx.bindings()
         if not store.get_binding(binding_id):
             raise ApiError("绑定不存在", 404)
+        # asyncMode：前端新调用方式，校验通过后立刻返回，提交丢后台线程。
+        # 不传则保持原同步行为（旧客户端 / 契约测试依赖同步返回的 queued）。
+        if bool(body.get("asyncMode")):
+            self._spawn_submit(store, binding_id, rel_paths, target_ids, upload_all)
+            self._json({"ok": True, "accepted": True, "id": binding_id})
+            return
         try:
             count = store.upload_files(
                 binding_id, rel_paths=rel_paths,
@@ -1555,6 +2023,23 @@ class AppHandler(BaseHTTPRequestHandler):
         progress = store.get_progress(binding_id, submit_only=True) or {}
         self._json({"ok": True, "queued": count,
                     "submit": progress.get("submit") or {}})
+
+    def _spawn_submit(self, store, binding_id, rel_paths, target_ids, upload_all):
+        """把一次提交丢到后台线程，立即返回。幂等闸门在 upload_files 内部。"""
+        def _run():
+            try:
+                store.upload_files(
+                    binding_id, rel_paths=rel_paths,
+                    target_ids=target_ids, upload_all=upload_all)
+            except Exception as exc:
+                # upload_files 内部已做异常收尾（会写 phase=error）；这里兜底记日志，
+                # 绝不让线程里的异常静默消失。
+                try:
+                    self.ctx.log("异步提交后台异常：%s" % exc)
+                except Exception:
+                    pass
+        threading.Thread(target=_run, daemon=True,
+                         name="submit-%s" % str(binding_id)[:12]).start()
 
     def h_bindings_progress(self, query, body):
         # 必须用 _arg 取首个值：parse_qs 会把所有值包成 list，直接
@@ -1594,13 +2079,21 @@ class AppHandler(BaseHTTPRequestHandler):
         STATE_MAP = {0: "pending", 1: "uploading", 2: "done", 3: "cancelled",
                      4: "cancelled", 5: "pending", 6: "failed", 7: "failed"}
         tasks = []
+        missing_id = 0
         # 运行中的放前面
         for tk in data.get("undone") or []:
             if not isinstance(tk, dict):
                 continue
+            tid = str(tk.get("id") or "").strip()
+            if not tid:
+                # 没有 id 的任务对前端毫无用处：它的 id 会塌成同一个 "ol_"，
+                # 前端按 id 去重后这些行会**静默消失**；更糟的是单条操作接口
+                # 拿到 "ol_" 也定位不到任何任务。这里直接跳过并计数。
+                missing_id += 1
+                continue
             state = int(tk.get("state") or 0)
             tasks.append({
-                "id": "ol_" + str(tk.get("id") or ""),
+                "id": OL_TASK_ID_PREFIX + tid,
                 "name": tk.get("name") or "复制任务",
                 "remotePath": "OpenList 服务端复制",
                 "size": int(tk.get("total_bytes") or tk.get("total") or 0),
@@ -1610,7 +2103,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 "error": tk.get("error") or "",
                 "speed": 0,
                 "isOpenList": True,
-                "openListId": str(tk.get("id") or ""),
+                "openListId": tid,
             })
         # 最近完成的（最多 3000 条）
         done_list = data.get("done") or []
@@ -1618,9 +2111,13 @@ class AppHandler(BaseHTTPRequestHandler):
         for tk in done_list:
             if not isinstance(tk, dict):
                 continue
+            tid = str(tk.get("id") or "").strip()
+            if not tid:
+                missing_id += 1
+                continue
             state = int(tk.get("state") or 2)
             tasks.append({
-                "id": "ol_" + str(tk.get("id") or ""),
+                "id": OL_TASK_ID_PREFIX + tid,
                 "name": tk.get("name") or "复制任务",
                 "remotePath": "OpenList 服务端复制",
                 "size": int(tk.get("total_bytes") or tk.get("total") or 0),
@@ -1630,8 +2127,12 @@ class AppHandler(BaseHTTPRequestHandler):
                 "error": tk.get("error") or "",
                 "speed": 0,
                 "isOpenList": True,
-                "openListId": str(tk.get("id") or ""),
+                "openListId": tid,
             })
+        if missing_id:
+            # 只记一条汇总日志：每 2 秒轮询一次，逐条打日志会把 info.log 冲爆
+            self.ctx.log("[api] 跳过 %d 个没有 id 的 OpenList 任务（无法定位/去重）"
+                         % missing_id)
         self._json({"ok": True, "tasks": tasks})
 
     def h_log(self, query, body):
@@ -1649,8 +2150,7 @@ class AppHandler(BaseHTTPRequestHandler):
         n = max(50, min(2000, n))
         level = str(_first(query.get("level")) or "").lower()
         try:
-            with open(config.log_path(), "r", encoding="utf-8", errors="replace") as fh:
-                lines = fh.readlines()[-n:]
+            lines = _tail_lines(config.log_path(), n)
         except OSError:
             lines = []
         parsed = []
@@ -1719,6 +2219,10 @@ _ROUTES = {
     ("POST", "/api/upload/clear"): "h_upload_clear",
     ("POST", "/api/upload/pause"): "h_upload_pause",
     ("POST", "/api/upload/cancel_all"): "h_upload_cancel_all",
+    # OpenList 服务端任务的单条操作（body {"id": "ol_<tid>"[, "type"]}）
+    ("POST", "/api/openlist/task/cancel"): "h_openlist_task_cancel",
+    ("POST", "/api/openlist/task/retry"): "h_openlist_task_retry",
+    ("POST", "/api/openlist/task/delete"): "h_openlist_task_delete",
     # 目录绑定
     ("GET", "/api/bindings"): "h_bindings_list",
     ("GET", "/api/bindings/detail"): "h_bindings_detail",
@@ -1802,13 +2306,47 @@ def set_app_context(ctx, log=None):
 # 服务启动
 # --------------------------------------------------------------------------
 
+def _unix_socket_alive(socket_path):
+    """socket 文件还在，是否真有实例在监听。"""
+    import socket as _socket
+    if not hasattr(_socket, "AF_UNIX"):
+        return False
+    sock = None
+    try:
+        sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        sock.settimeout(1.0)
+        sock.connect(socket_path)
+        return True
+    except OSError:
+        return False
+    finally:
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+
 def create_unix_server(socket_path, ctx):
-    """统一网关模式：监听 Unix Socket。Windows 无 UnixStreamServer，类定义条件化。"""
+    """统一网关模式：监听 Unix Socket。Windows 无 UnixStreamServer，类定义条件化。
+
+    单实例保护：早先无条件 `os.unlink(socket_path)` 再 bind —— 第二个实例启动
+    会把正在运行那个实例的 socket 路径摘掉，新旧两个进程各自持有一份
+    queue.json / bindings.json，互相覆盖（症状是"刚加的任务自己消失了"）。
+    现在先探活：能连上就拒绝启动；连不上（残留的僵尸 socket）才删掉重建。
+    """
     if hasattr(socketserver, "UnixStreamServer"):
         class _UnixServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
             daemon_threads = True
             allow_reuse_address = True
         _UnixServer.ctx = ctx
+
+        if os.path.exists(socket_path) and _unix_socket_alive(socket_path):
+            ctx.log("已有实例正在监听 %s，本进程不再重复启动（避免两个进程共写数据文件）"
+                    % socket_path)
+            ctx.single_instance_conflict = True
+            return None
+
         try:
             os.unlink(socket_path)
         except OSError:

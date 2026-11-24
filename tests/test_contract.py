@@ -67,10 +67,11 @@ class FrontendContractTest(unittest.TestCase):
             self.assertTrue(hit, "index.html 缺少自绘弹层 %s" % name)
 
     def test_fn_brand_colors_pinned(self):
-        """色值是从飞牛官网 grep 出来的，写进 :root 并用测试钉住。"""
-        for token in ("--fn-blue:#0f5fff", "--fn-blue2:#4593ff",
-                      "--fn-soft:#edf5ff", "--fn-text:#1f2024"):
-            self.assertIn(token, self.html, "缺少飞牛配色变量 %s" % token)
+        """主色令牌：钉住亮蓝正色系（2.15.46 提亮主色，按钮不再发闷），防止回退。
+        色相统一在 205-212°，文字色满足 WCAG AA 对比度。值来自 index.html :root。"""
+        for token in ("--fn-blue:#1976D2", "--fn-blue2:#2196F3",
+                      "--fn-soft:#EAF4FE", "--fn-text:#16223A"):
+            self.assertIn(token, self.html, "缺少亮蓝配色变量 %s" % token)
 
     def test_localstorage_access_is_guarded(self):
         """localStorage 在 iframe 里可能抛异常，必须 try/catch 包裹。"""

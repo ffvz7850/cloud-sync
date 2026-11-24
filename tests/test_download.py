@@ -127,6 +127,13 @@ def get_resp(path, size=0, raw_url="", is_dir=False):
     return JsonResp(200, {"code": 200, "message": "success", "data": node})
 
 
+def write_part_meta(local_path, remote_path="/a.bin", size=10, modified=""):
+    """伪造一份「上次下载写下的」续传指纹（与 openlist._write_part_meta 同格式）。"""
+    import json
+    with open(local_path + ".ddpart.meta", "w", encoding="utf-8") as fh:
+        json.dump({"path": remote_path, "size": size, "modified": modified}, fh)
+
+
 class AbsoluteUrlTest(unittest.TestCase):
     def test_relative_uses_openlist_base(self):
         client, _ = make_client()
@@ -227,6 +234,8 @@ class DownloadToFileTest(unittest.TestCase):
         os.makedirs(os.path.dirname(self.local), exist_ok=True)
         with open(self.local + ".ddpart", "wb") as fh:
             fh.write(b"hello")
+        # 续传的前提是「能证明半成品属于远端这个文件」——指纹由上次下载写下
+        write_part_meta(self.local, size=10)
         transport = FakeTransport()
         transport.push("POST", "/api/fs/get", get_resp("/a.bin", size=10,
                                                        raw_url="/d/a.bin"))
@@ -249,6 +258,7 @@ class DownloadToFileTest(unittest.TestCase):
         os.makedirs(os.path.dirname(self.local), exist_ok=True)
         with open(self.local + ".ddpart", "wb") as fh:
             fh.write(b"hello")
+        write_part_meta(self.local, size=10)
         transport = FakeTransport()
         transport.push("POST", "/api/fs/get", get_resp("/a.bin", size=10,
                                                        raw_url="/d/a.bin"))
@@ -259,6 +269,30 @@ class DownloadToFileTest(unittest.TestCase):
         self.assertEqual(result["size"], 10)
         with open(self.local, "rb") as fh:
             self.assertEqual(fh.read(), b"helloworld")
+
+    def test_naked_part_without_meta_is_not_resumed(self):
+        """裸半成品（没有指纹）不能续传 —— 老代码只看大小就接上去写。
+
+        后果：云端同名文件被换成"同大小不同内容"时，会拼出大小正确、内容错误
+        的文件并报成功。没有指纹 = 证明不了是不是同一个文件，只能重下。
+        """
+        client, _ = make_client()
+        os.makedirs(os.path.dirname(self.local), exist_ok=True)
+        with open(self.local + ".ddpart", "wb") as fh:
+            fh.write(b"AAAAA")           # 5 字节，大小"刚好"对得上
+        transport = FakeTransport()
+        transport.push("POST", "/api/fs/get", get_resp("/a.bin", size=10,
+                                                       raw_url="/d/a.bin"))
+        transport.push("GET", "/d/a.bin",
+                       StreamResp(200, [b"BBBBBBBBBB"], {"content-length": "10"}))
+        with PatchTransport(transport):
+            result = client.download_to_file("/a.bin", self.local)
+        get_call = [c for c in transport.calls if c["method"] == "GET"][0]
+        self.assertNotIn("Range", get_call["headers"])
+        self.assertEqual(result["size"], 10)
+        with open(self.local, "rb") as fh:
+            # 落地内容必须完全是新内容，不能有旧字节残留
+            self.assertEqual(fh.read(), b"BBBBBBBBBB")
 
     def test_size_mismatch_raises_and_keeps_target_clean(self):
         client, _ = make_client()

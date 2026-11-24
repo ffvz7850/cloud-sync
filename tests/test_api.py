@@ -7,6 +7,7 @@
 import json
 import os
 import tempfile
+import time
 import unittest
 
 import support
@@ -1061,6 +1062,34 @@ class UploadParamTypeTest(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertIn("数组", data["error"])
 
+    def test_async_mode_still_validates_params(self):
+        """asyncMode 只改变执行方式，不能绕过参数校验。"""
+        status, data = jcall(self.ctx, "POST", "/api/bindings/upload",
+                             {"id": self.b["id"], "relPaths": "a.txt",
+                              "asyncMode": True})
+        self.assertEqual(status, 400)
+        self.assertIn("数组", data["error"])
+
+    def test_async_mode_accepts_immediately(self):
+        """asyncMode 立即返回 accepted，提交交给后台线程，不阻塞请求。"""
+        status, data = jcall(self.ctx, "POST", "/api/bindings/upload",
+                             {"id": self.b["id"], "all": True,
+                              "asyncMode": True})
+        self.assertEqual(status, 200)
+        self.assertTrue(data.get("accepted"))
+        self.assertEqual(data.get("id"), self.b["id"])
+        # 后台线程会把 _submit 收尾（即使本绑定无待传文件，也会写终态）。
+        # 轮询等待，带超时保护，避免线程异常导致测试永久挂起。
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            prog = self.store.get_progress(self.b["id"], submit_only=True) or {}
+            st = prog.get("submit") or {}
+            if st and not st.get("active") and (st.get("phase") or st.get("message")):
+                break
+            time.sleep(0.02)
+        else:
+            self.fail("异步提交线程未在 5 秒内写出终态")
+
 
 class QueueRouteTest(unittest.TestCase):
     def test_remove_unknown_task_is_404(self):
@@ -1103,6 +1132,521 @@ class CloudListRequestCountTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(data["write"], "write 标志要能从 meta 拿到")
         self.assertEqual(len(calls), 1, "不该为了 write 再发一次请求")
+
+
+# ---------------------------------------------------------------------------
+# v2.15.40：传输列表的「全部暂停 / 全部取消 / 全部重试 / 单条动作」
+# ---------------------------------------------------------------------------
+
+def ctx_with_task_server(server):
+    """造一个 HTTP 层上下文，客户端换成**真 OpenlistClient**（传输层打桩）。"""
+    ctx = make_ctx()
+    ctx._client = support.make_openlist_client()
+    return ctx, support.PatchTransport(server)
+
+
+class CancelAllTest(unittest.TestCase):
+    """「全部取消」必须真的让 OpenList 的任务停下，并如实回报。
+
+    旧实现的两处致命问题都在这里钉住：
+      1. 只 `list_tasks("copy")` —— upload 类型任务永远取消不掉；
+      2. 批量接口 HTTP 200 就算成功 —— "一个都没取消"也报"已取消 N 个"。
+
+    ⚠️ 但 v2.15.40 的口径是「**所见即所取消**」：传输列表目前只聚合 `copy`
+    （`h_openlist_tasks`），所以 cancel_all 也只动 `copy`。用户屏幕上根本看不到
+    的类型，不该被一次「全部取消」停掉 —— 那不是取消全部，那是顺手停别人的任务。
+    第二条断言（upload 一次都不能被请求）就是防止将来有人"顺手"把范围扩回去：
+    要与列表聚合范围**同步**扩，不能单方面扩。
+    """
+
+    def test_only_visible_task_type_is_cancelled(self):
+        """只取消 copy；upload 类型**一次都不许请求**（列表里看不到它）。"""
+        server = support.FakeTaskServer(undone=[{"id": "c1"}, {"id": "c2"}])
+        server.add({"id": "u1"}, task_type="upload")
+        ctx, patch = ctx_with_task_server(server)
+        with patch:
+            status, data = jcall(ctx, "POST", "/api/upload/cancel_all", {})
+        self.assertEqual(status, 200)
+        self.assertEqual(data["openlistRequested"], 2, data)
+        self.assertEqual(data["openlistCancelled"], 2, data)
+        self.assertEqual(data["openlistRemaining"], 0, data)
+        self.assertEqual(server.ids("copy"), [], "copy 任务必须真的被取消")
+        # 关键：提交给 OpenList 的类型只有 copy，且调用序列里一个 upload 都没有
+        self.assertEqual([b["type"] for b in server.batch_bodies], ["copy"],
+                         server.batch_bodies)
+        upload_calls = [c for c in server.calls if "upload" in c[1]]
+        self.assertEqual(upload_calls, [],
+                         "传输列表看不到 upload 任务，就不该去动它：%s" % (server.calls,))
+        self.assertEqual(server.ids("upload"), ["u1"], "外部 upload 任务必须原封不动")
+        self.assertEqual(list(data["openlistTypes"].keys()), ["copy"], data)
+
+    def test_residual_is_reported_not_hidden(self):
+        """取消不掉的必须如实报「还剩 N 个」，不能按请求成功算成功。"""
+        server = support.FakeTaskServer(undone=[{"id": "c1"}], stuck=["stuck"])
+        server.add({"id": "stuck"})
+        ctx, patch = ctx_with_task_server(server)
+        with patch:
+            status, data = jcall(ctx, "POST", "/api/upload/cancel_all", {})
+        self.assertEqual(status, 200)
+        self.assertEqual(data["openlistRequested"], 2, data)
+        self.assertEqual(data["openlistCancelled"], 1, data)
+        self.assertEqual(data["openlistRemaining"], 1, data)
+        self.assertEqual(server.ids("copy"), ["stuck"])
+        # 逐条兜底也打过（批量报错后对残留再试一次单条接口）
+        self.assertTrue(any("cancel?tid=stuck" in c[1] for c in server.calls),
+                        server.calls)
+
+    def test_naturally_finished_task_is_not_counted_as_cancelled(self):
+        """回读核验必须区分「被取消」和「这期间自己跑完」。
+
+        旧口径 `cancelled = requested - len(undone)` 会把 state=2(succeeded) /
+        state=7(failed) 也算成"已停下"，于是刚才有任务跑完时会谎报取消数 ——
+        与"批量接口 200 就算成功"是同一类错误，必须钉死。
+        """
+
+        class Probe(object):
+            def __init__(self):
+                self.n = 0
+
+            def list_tasks(self, task_type):
+                self.n += 1
+                if self.n == 1:
+                    return {"undone": [{"id": "x1", "state": 1}], "done": []}
+                return {"undone": [], "done": [{"id": "x1", "state": 2}]}
+
+            def cancel_tasks(self, tids, task_type):
+                return {"ok": 1, "failed": []}
+
+        report = http_api._cancel_openlist_undone(Probe())
+        self.assertEqual(report["cancelled"], 0, report)
+        self.assertEqual(report["finished"], 1, report)
+        self.assertEqual(report["remaining"], 0, report)
+
+    def test_local_queues_are_cancelled_and_unpaused(self):
+        """本地「全部取消」后必须解除暂停，否则接着点「重试」什么都不会发生。"""
+        ctx = make_ctx()
+        local = os.path.join(ctx._sandbox, "q-pending.bin")
+        with open(local, "w") as fh:
+            fh.write("x")
+        ctx._queue.add([{"localPath": local, "remotePath": "/q-pending.bin"}])
+        jcall(ctx, "POST", "/api/upload/pause", {"paused": True})
+        self.assertTrue(ctx._queue.is_paused())
+        status, data = jcall(ctx, "POST", "/api/upload/cancel_all", {})
+        self.assertEqual(status, 200)
+        self.assertEqual(data["cancelled"], 1)
+        self.assertTrue(data["unpaused"], "取消全部应当解除暂停")
+        self.assertFalse(ctx._queue.is_paused())
+        self.assertFalse(data["paused"])
+        # 取消掉的本地任务确实是 cancelled，不是还挂在 pending
+        self.assertEqual(ctx._queue.list()[0]["status"], "cancelled")
+
+    def test_openlist_failure_does_not_break_local_cancel(self):
+        """OpenList 连不上时本地取消照样生效，接口不 500。"""
+        ctx = make_ctx()          # FakeClient 没有任务接口 → 一定报错
+        local = os.path.join(ctx._sandbox, "q2.bin")
+        with open(local, "w") as fh:
+            fh.write("x")
+        ctx._queue.add([{"localPath": local, "remotePath": "/q2.bin"}])
+        status, data = jcall(ctx, "POST", "/api/upload/cancel_all", {})
+        self.assertEqual(status, 200)
+        self.assertEqual(data["cancelled"], 1)
+        self.assertEqual(data["openlistCancelled"], 0)
+
+
+class PauseSemanticsTest(unittest.TestCase):
+    """暂停**只对本地队列生效**：OpenList 没有暂停能力，只有取消。"""
+
+    def test_pause_does_not_cancel_openlist_tasks(self):
+        server = support.FakeTaskServer(undone=[{"id": "c1"}, {"id": "c2"}])
+        ctx, patch = ctx_with_task_server(server)
+        with patch:
+            status, data = jcall(ctx, "POST", "/api/upload/pause", {"paused": True})
+        self.assertEqual(status, 200)
+        self.assertTrue(data["paused"])
+        self.assertFalse(data["openlistPausable"])
+        # 关键：暂停不该悄悄取消服务端任务（旧实现会，导致恢复后文件变少）
+        self.assertEqual(server.ids("copy"), ["c1", "c2"])
+        self.assertEqual(server.batch_bodies, [], "暂停不该发任何取消请求")
+        self.assertTrue(ctx._queue.is_paused())
+
+
+class RetryAllOpenListTest(unittest.TestCase):
+    """「全部重试」必须把 OpenList 的失败项也真的重试掉（BUG-2）。
+
+    范围与 cancel_all 同一口径：只碰传输列表**可见**的类型（当前是 copy）。
+    列表看不到 upload 任务，替它"顺手重试"同样是越界 —— 而且会让「重试了几个」
+    这个数字对不上用户看到的行数。
+    """
+
+    def _seed_local_failed(self, ctx):
+        f = os.path.join(ctx._sandbox, "fail.txt")
+        with open(f, "w") as fh:
+            fh.write("data")
+        ctx._queue.add([{"localPath": f, "remotePath": "/fail.txt"}])
+        tid = ctx._queue.list()[0]["id"]
+        ctx._queue._set({"id": tid}, status="failed", attempts=3, error="boom")
+        ctx._queue.save(force=True)
+        return tid
+
+    def test_both_local_and_openlist_are_retried(self):
+        server = support.FakeTaskServer()
+        server.add_done({"id": "f1", "state": 7})
+        ctx, patch = ctx_with_task_server(server)
+        self._seed_local_failed(ctx)
+        with patch:
+            status, data = jcall(ctx, "POST", "/api/upload/retry", {"all": True})
+        self.assertEqual(status, 200)
+        self.assertEqual(data["retried"], 1, "本地失败项照旧重试")
+        self.assertEqual(data["openlistRetried"], 1, data)
+        self.assertTrue(data["openlistRetriedKnown"], data)
+        self.assertEqual(server.ids(), ["f1"], "OpenList 的失败项被搬回执行队列")
+        # 只调 copy 的 retry_failed；upload 一次都不许调（列表里看不到它）
+        called = [c[1] for c in server.calls if c[1].startswith("retry_failed")]
+        self.assertEqual(called, ["retry_failed:copy"], server.calls)
+        self.assertEqual([c for c in server.calls if "upload" in c[1]], [],
+                         "看不见的类型不该被顺手重试：%s" % (server.calls,))
+
+    def test_only_openlist_failed_still_works(self):
+        """本地 0 失败 + OpenList 有失败：按钮会出现（前端用例），点了要真有效。"""
+        server = support.FakeTaskServer()
+        server.add_done({"id": "f1", "state": 7})
+        server.add_done({"id": "f2", "state": 6})
+        ctx, patch = ctx_with_task_server(server)
+        with patch:
+            status, data = jcall(ctx, "POST", "/api/upload/retry", {"all": True})
+        self.assertEqual(status, 200)
+        self.assertEqual(data["retried"], 0)
+        self.assertEqual(data["openlistRetried"], 2, data)
+
+    def test_upload_type_failures_are_left_alone(self):
+        """外部应用留下的 upload 失败任务不该被本应用的「全部重试」动到。"""
+        server = support.FakeTaskServer()
+        server.add_done({"id": "u1", "state": 7}, task_type="upload")
+        ctx, patch = ctx_with_task_server(server)
+        with patch:
+            status, data = jcall(ctx, "POST", "/api/upload/retry", {"all": True})
+        self.assertEqual(status, 200)
+        self.assertEqual(data["openlistRetried"], 0, data)
+        self.assertEqual([t["id"] for t in server.done["upload"]], ["u1"],
+                         "别人家的 upload 失败任务必须原封不动")
+        self.assertEqual([c for c in server.calls if "upload" in c[1]], [],
+                         server.calls)
+
+    def test_unknown_count_is_not_faked(self):
+        """OpenList 任务列表查不到时 openlistRetriedKnown 必须是 False。"""
+
+        class NoList(object):
+            def __call__(self, method, url, headers=None, body=None, timeout=60):
+                if method == "GET":
+                    return support.FakeTaskResp(
+                        500, {"code": 500, "message": "boom", "data": None})
+                return support.FakeTaskResp(
+                    200, {"code": 200, "message": "success", "data": None})
+
+        ctx = make_ctx()
+        ctx._client = support.make_openlist_client()
+        with support.PatchTransport(NoList()):
+            status, data = jcall(ctx, "POST", "/api/upload/retry", {"all": True})
+        self.assertEqual(status, 200)
+        self.assertFalse(data["openlistRetriedKnown"])
+        self.assertEqual(data["openlistRetried"], 0)
+
+
+class OpenListTaskActionTest(unittest.TestCase):
+    """传输列表里 OpenList 行的「取消 / 重试 / 删除」三个按钮的落点。"""
+
+    def test_cancel_by_ol_id(self):
+        server = support.FakeTaskServer(undone=[{"id": "c1"}])
+        ctx, patch = ctx_with_task_server(server)
+        with patch:
+            status, data = jcall(ctx, "POST", "/api/openlist/task/cancel",
+                                {"id": "ol_c1"})
+        self.assertEqual(status, 200, data)
+        self.assertEqual(data["type"], "copy")
+        self.assertEqual(server.ids("copy"), [])
+
+    def test_type_is_detected_automatically(self):
+        """前端不知道任务类型 → 后端 copy → upload 依次试。"""
+        server = support.FakeTaskServer()
+        server.add({"id": "u1"}, task_type="upload")
+        ctx, patch = ctx_with_task_server(server)
+        with patch:
+            status, data = jcall(ctx, "POST", "/api/openlist/task/cancel",
+                                 {"id": "ol_u1"})
+        self.assertEqual(status, 200, data)
+        self.assertEqual(data["type"], "upload")
+        self.assertEqual(server.ids("upload"), [])
+
+    def test_retry_and_delete(self):
+        server = support.FakeTaskServer(undone=[{"id": "c1"}, {"id": "c2"}])
+        ctx, patch = ctx_with_task_server(server)
+        with patch:
+            status, _ = jcall(ctx, "POST", "/api/openlist/task/retry", {"id": "ol_c1"})
+            self.assertEqual(status, 200)
+            status, _ = jcall(ctx, "POST", "/api/openlist/task/delete", {"id": "ol_c2"})
+            self.assertEqual(status, 200)
+        self.assertEqual(server.ids("copy"), ["c1"], "删除只删掉 c2")
+
+    def test_missing_and_unknown_ids(self):
+        server = support.FakeTaskServer(undone=[])
+        ctx, patch = ctx_with_task_server(server)
+        with patch:
+            status, data = jcall(ctx, "POST", "/api/openlist/task/cancel", {})
+            self.assertEqual(status, 400)
+            self.assertIn("id", data["error"])
+            status, data = jcall(ctx, "POST", "/api/openlist/task/cancel",
+                                 {"id": "ol_ghost"})
+            self.assertEqual(status, 404, data)
+
+
+class OpenListTaskListTest(unittest.TestCase):
+    """`/api/openlist/tasks` 的边界：没有 id 的任务必须跳过（R08）。"""
+
+    def test_tasks_without_id_are_skipped(self):
+        """id 为空的任务会把 id 全塌成 "ol_"，前端按 id 去重后静默消失。
+
+        更糟的是单条操作接口拿到 "ol_" 也定位不到任何任务 —— 所以这类行
+        干脆不发给前端，只在服务端日志里留一条汇总。
+        """
+
+        class Stub(object):
+            def __call__(self, method, url, headers=None, body=None, timeout=60):
+                if "/api/task/copy/undone" in url:
+                    return support.FakeTaskResp(200, {"code": 200, "data": [
+                        {"id": "t1", "name": "ok.bin", "state": 1},
+                        {"id": "", "name": "no-id.bin", "state": 1},
+                        {"name": "missing-key.bin", "state": 1},
+                    ]})
+                if "/api/task/copy/done" in url:
+                    return support.FakeTaskResp(200, {"code": 200, "data": [
+                        {"id": "", "name": "no-id-done.bin", "state": 2},
+                        {"id": "d1", "name": "done.bin", "state": 2,
+                         "total_bytes": 100},
+                    ]})
+                return support.FakeTaskResp(404, {"code": 404, "data": None})
+
+        ctx, patch = ctx_with_task_server(Stub())
+        with patch:
+            status, data = jcall(ctx, "GET", "/api/openlist/tasks")
+        self.assertEqual(status, 200)
+        ids = [t["id"] for t in data["tasks"]]
+        self.assertEqual(ids, ["ol_t1", "ol_d1"], data)
+        self.assertEqual(len(set(ids)), len(ids), "不许出现重复 id")
+        self.assertTrue(all(t["openListId"] for t in data["tasks"]),
+                        "每条都要能被单条接口定位")
+
+    def test_progress_and_size_are_passed_through(self):
+        """`progress` / `total_bytes` 原样透传（前端据此画百分比与指纹）。"""
+
+        class Stub(object):
+            def __call__(self, method, url, headers=None, body=None, timeout=60):
+                if "/api/task/copy/undone" in url:
+                    return support.FakeTaskResp(200, {"code": 200, "data": [
+                        {"id": "t1", "name": "x", "state": 1,
+                         "progress": 42, "total_bytes": 2048},
+                    ]})
+                if "/api/task/copy/done" in url:
+                    return support.FakeTaskResp(200, {"code": 200, "data": []})
+                return support.FakeTaskResp(404, {"code": 404, "data": None})
+
+        ctx, patch = ctx_with_task_server(Stub())
+        with patch:
+            status, data = jcall(ctx, "GET", "/api/openlist/tasks")
+        task = data["tasks"][0]
+        self.assertEqual(task["progress"], 42)
+        self.assertEqual(task["size"], 2048)
+        self.assertEqual(task["status"], "uploading")
+
+
+class TransferRecordTest(unittest.TestCase):
+    """v2.15.40：本地传本地 / 同存储云端复制在传输列表里必须看得到（BUG-3）。"""
+
+    def _make_src(self, ctx, name="from"):
+        src = os.path.join(ctx._sandbox, name)
+        os.makedirs(os.path.join(src, "sub"), exist_ok=True)
+        with open(os.path.join(src, "a.txt"), "w") as fh:
+            fh.write("A")
+        with open(os.path.join(src, "sub", "b.txt"), "w") as fh:
+            fh.write("BB")
+        return src
+
+    def _records(self, ctx):
+        status, data = jcall(ctx, "GET", "/api/upload/list")
+        self.assertEqual(status, 200)
+        return [t for t in data["tasks"] if t.get("isRecord")]
+
+    def test_local_copy_creates_visible_record(self):
+        ctx = make_ctx()
+        src = self._make_src(ctx)
+        dst = os.path.join(ctx._sandbox, "to")
+        status, data = jcall(ctx, "POST", "/api/sync/copy", {
+            "side": "local", "items": [src], "target": dst})
+        self.assertEqual(status, 200)
+        self.assertEqual(data["copied"], 1)
+        records = self._records(ctx)
+        self.assertEqual(len(records), 1, records)
+        rec = records[0]
+        self.assertTrue(rec["id"].startswith("lc_"), rec["id"])
+        self.assertEqual(rec["kind"], "local")
+        self.assertEqual(rec["direction"], "localcopy")
+        self.assertEqual(rec["status"], "done")
+        self.assertTrue(rec["isDir"], "目录按一条记，且要标成目录")
+        self.assertEqual(rec["name"], "from")
+        self.assertIn(os.path.join(dst, "from"), rec["dstPath"])
+        # 目录不该带"大小"
+        self.assertEqual(rec["size"], 0)
+
+    def test_local_copy_file_record_has_size(self):
+        ctx = make_ctx()
+        src = os.path.join(ctx._sandbox, "one.bin")
+        with open(src, "wb") as fh:
+            fh.write(b"x" * 321)
+        dst = os.path.join(ctx._sandbox, "dst2")
+        status, data = jcall(ctx, "POST", "/api/sync/copy", {
+            "side": "local", "items": [src], "target": dst})
+        self.assertEqual(status, 200)
+        rec = self._records(ctx)[0]
+        self.assertFalse(rec["isDir"])
+        self.assertEqual(rec["size"], 321)
+
+    def test_precheck_failure_is_not_recorded(self):
+        """预检挡下的条目**不落记录**（R11）。
+
+        它们是"参数不对"而不是"复制失败了"：错误已经逐条从 `failed` 回给前端，
+        再落记录只会让反复误操作迅速填满 500 条上限、把真正的成功回执挤掉。
+        """
+        ctx = make_ctx()
+        status, data = jcall(ctx, "POST", "/api/sync/copy", {
+            "side": "local", "items": [ctx._sandbox], "target": ctx._sandbox})
+        self.assertEqual(status, 200)
+        self.assertEqual(data["copied"], 0)
+        self.assertEqual(len(data["failed"]), 1, data)
+        self.assertIn("根目录", data["failed"][0]["error"])
+        self.assertEqual(data.get("records"), 0, "预检失败不该产生传输记录")
+        self.assertEqual(self._records(ctx), [], self._records(ctx))
+
+    def test_precheck_failure_keeps_existing_records(self):
+        """成功的记录不能被后续误操作挤掉（上限是 500 条，同一条路径反复点也一样）。"""
+        ctx = make_ctx()
+        src = self._make_src(ctx)
+        jcall(ctx, "POST", "/api/sync/copy", {
+            "side": "local", "items": [src], "target": os.path.join(ctx._sandbox, "t")})
+        for _ in range(20):
+            jcall(ctx, "POST", "/api/sync/copy",
+                  {"side": "local", "items": [ctx._sandbox], "target": ctx._sandbox})
+        records = self._records(ctx)
+        self.assertEqual(len(records), 1, "20 次误操作也不该多出任何记录")
+        self.assertEqual(records[0]["status"], "done")
+
+    def test_copy_stage_failure_is_recorded(self):
+        """真正进入复制阶段后失败 → 要落一条失败记录（R11 的另一半）。"""
+        ctx = make_ctx()
+        src = os.path.join(ctx._sandbox, "fromdir")
+        os.makedirs(src, exist_ok=True)
+        with open(os.path.join(src, "a.txt"), "w") as fh:
+            fh.write("A")
+        target = os.path.join(ctx._sandbox, "dst-fail")
+        os.makedirs(target, exist_ok=True)
+        # 目标位置先放一个同名**文件**挡路 → copytree 建不出目录（OSError）
+        with open(os.path.join(target, "fromdir"), "w") as fh:
+            fh.write("x")
+        status, data = jcall(ctx, "POST", "/api/sync/copy", {
+            "side": "local", "items": [src], "target": target})
+        self.assertEqual(status, 200)
+        self.assertEqual(data["copied"], 0)
+        self.assertEqual(len(data["failed"]), 1, data)
+        records = self._records(ctx)
+        self.assertEqual(len(records), 1, "复制阶段失败必须留记录")
+        self.assertEqual(records[0]["status"], "failed")
+        self.assertTrue(records[0]["error"])
+
+    def test_record_can_be_removed(self):
+        ctx = make_ctx()
+        src = self._make_src(ctx)
+        jcall(ctx, "POST", "/api/sync/copy", {
+            "side": "local", "items": [src], "target": os.path.join(ctx._sandbox, "t")})
+        rec = self._records(ctx)[0]
+        status, data = jcall(ctx, "POST", "/api/upload/remove", {"id": rec["id"]})
+        self.assertEqual(status, 200)
+        self.assertTrue(data.get("record"))
+        self.assertEqual(self._records(ctx), [])
+        # 再删一次 → 404（记录已不存在，也不能谎报成功）
+        status, _ = jcall(ctx, "POST", "/api/upload/remove", {"id": rec["id"]})
+        self.assertEqual(status, 404)
+
+    def test_clear_done_removes_records(self):
+        ctx = make_ctx()
+        src = self._make_src(ctx)
+        jcall(ctx, "POST", "/api/sync/copy", {
+            "side": "local", "items": [src], "target": os.path.join(ctx._sandbox, "t")})
+        self.assertEqual(len(self._records(ctx)), 1)
+        status, data = jcall(ctx, "POST", "/api/upload/clear", {})
+        self.assertEqual(status, 200)
+        self.assertEqual(data["recordsRemoved"], 1)
+        self.assertEqual(data["removed"], 1)
+        self.assertEqual(self._records(ctx), [])
+
+    def test_same_storage_cloud_copy_creates_record(self):
+        """同存储云端复制是同步完成的（没有 tasks）→ 必须落 olc_ 记录。"""
+        client = FakeClient()          # copy() 返回 {"tasks": []}
+        ctx = make_ctx(client)
+        status, data = jcall(ctx, "POST", "/api/sync/copy", {
+            "side": "cloud", "items": [{"src": "/src/a.mkv", "dst": "/dst/a.mkv",
+                                        "size": 2048, "isDir": False}]})
+        self.assertEqual(status, 200)
+        self.assertEqual(data["copied"], 1)
+        self.assertEqual(data["tasks"], [])
+        records = self._records(ctx)
+        self.assertEqual(len(records), 1, records)
+        rec = records[0]
+        self.assertTrue(rec["id"].startswith("olc_"), rec["id"])
+        self.assertEqual(rec["kind"], "cloud")
+        self.assertEqual(rec["direction"], "cloudcopy")
+        self.assertEqual(rec["srcPath"], "/src/a.mkv")
+        self.assertEqual(rec["dstPath"], "/dst/a.mkv")
+        self.assertEqual(rec["size"], 2048)
+
+    def test_cross_storage_cloud_copy_makes_no_record(self):
+        """跨存储复制由 OpenList 建任务 → 任务列表已经能看到，不重复记录。"""
+        client = FakeClient()
+        client.copy = lambda *a, **kw: {"tasks": [{"id": "t1", "name": "a.mkv"}]}
+        ctx = make_ctx(client)
+        status, data = jcall(ctx, "POST", "/api/sync/copy", {
+            "side": "cloud", "items": ["/src/a.mkv"], "target": "/dst"})
+        self.assertEqual(status, 200)
+        self.assertEqual(data["tasks"], ["t1"])
+        self.assertEqual(self._records(ctx), [])
+
+    def test_cloud_copy_endpoint_records_and_returns_tasks(self):
+        """/api/cloud/copy 也要把 tasks 回传，并在同步完成时落记录。"""
+        client = FakeClient()
+        ctx = make_ctx(client)
+        status, data = jcall(ctx, "POST", "/api/cloud/copy", {
+            "srcDir": "/src", "dstDir": "/dst", "names": ["a.mkv", "b.mkv"]})
+        self.assertEqual(status, 200)
+        self.assertEqual(data["copied"], 2)
+        self.assertEqual(data["tasks"], [])
+        records = self._records(ctx)
+        self.assertEqual([r["name"] for r in records], ["a.mkv", "b.mkv"])
+
+    def test_records_are_bounded(self):
+        """记录只是回执，不能无限涨（有界 + 落盘）。"""
+        import transfer_records
+        ctx = make_ctx()
+        store = ctx.records()
+        store.limit = 5
+        for i in range(9):
+            store.add({"kind": "local", "name": "f%d" % i,
+                       "srcPath": "/a/f%d" % i, "dstPath": "/b/f%d" % i})
+        self.assertEqual(len(store.list()), 5)
+        self.assertEqual([r["name"] for r in store.list()],
+                         ["f4", "f5", "f6", "f7", "f8"])
+        # 落盘文件真的存在（重启后还在）
+        path = os.path.join(config.data_dir(), transfer_records.RECORD_FILE)
+        self.assertTrue(os.path.isfile(path), path)
+        with open(path, encoding="utf-8") as fh:
+            saved = json.load(fh)
+        self.assertEqual(len(saved["records"]), 5)
 
 
 if __name__ == "__main__":

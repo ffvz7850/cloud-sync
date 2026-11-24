@@ -33,6 +33,75 @@ SMALL_FILE_THRESHOLD = 4 * 1024 * 1024  # 小于这个走同步直传，省得�
 # OpenList 后台任务状态（pkg/tache/state.go）。只在判断复制任务结果时用。
 TASK_STATE_SUCCEEDED = 2
 TASK_STATE_FAILED = (4, 7)      # 4=已取消，7=失败且无剩余重试次数
+# 「失败、还能重试」的一组状态，专门给传输列表的「全部重试」计数用：
+# 5=errored（出错待重试）、6=failing（失败收尾）、7=failed（重试次数耗尽）。
+TASK_STATES_FAILED = (5, 6, 7)
+
+# 传输列表要覆盖的任务类型。OpenList 的任务端点形状是 /api/task/<type>/<action>：
+#   copy   —— 目录绑定备份、文件对比的跨存储复制产生；
+#   upload —— `As-Task` 模式的上传产生。
+# v2.15.39 及以前只处理 copy，于是 upload 类型任务在「全部取消」里永远停不下来。
+TASK_TYPES = ("copy", "upload")
+
+TASK_ACTION_LABELS = {"cancel": "取消", "retry": "重试", "delete": "删除"}
+
+
+def normalize_tids(tids):
+    """把任务 id 清单收敛成去空白、去重、保序的字符串列表。"""
+    out = []
+    seen = set()
+    for raw in tids or []:
+        tid = str(raw or "").strip()
+        if not tid or tid in seen:
+            continue
+        seen.add(tid)
+        out.append(tid)
+    return out
+
+
+def parse_batch_errors(data):
+    """解析批量任务接口返回的 `data`，得到 `{tid: 错误原因}`。
+
+    **这是「全部取消不生效」的根因所在**：真实 OpenList（server/handles/task.go
+    的 `getBatchHandler`）对批量接口**无论 tid 是否存在都返回 HTTP 200 +
+    code 200**，每个 tid 的结果放在 `data` 里 —— 成功是 null（Go 的 nil error），
+    失败是一句原因（`"task not found"` 之类）。所以「HTTP 成功」绝不等于
+    「任务被取消了」，必须逐条看这张表。
+
+    返回 None 表示**无法判断**（data 不是字典，或是个空字典 —— 服务端什么都没
+    告诉我们）。调用方必须把 None 当成「不知道」，绝不能当成成功 —— 旧实现
+    正是在这里 `return len(tids)` 谎报「已取消 N 个」。
+    """
+    if isinstance(data, dict) and data:
+        errors = {}
+        for key, value in data.items():
+            if value is None or value is False or value == "" or value == 0:
+                continue
+            errors[str(key)] = str(value)
+        return errors
+    return None
+
+
+def count_failed_tasks(tasks):
+    """数出任务列表里「失败」状态的条数（state 5/6/7）。
+
+    `retry_failed` 接口**不返回重试条数**，只能靠调用前后各数一次做差 ——
+    所以这个函数只是那套"差量核算"的一半，别指望它给出精确的重试数。
+    """
+    count = 0
+    for task in tasks or []:
+        if not isinstance(task, dict):
+            continue
+        state = task.get("state")
+        if state is None:
+            state = TASK_STATE_SUCCEEDED
+        try:
+            value = int(state)
+        except (TypeError, ValueError):
+            continue
+        if value in TASK_STATES_FAILED:
+            count += 1
+    return count
 
 
 # --------------------------------------------------------------------------
@@ -343,7 +412,11 @@ class OpenlistClient(object):
                                     status=status, kind="business")
             # 2xx 但不是 OpenList 标准响应（反代错误页、登录页等）→ 不能当成成功返回 {}，
             # 否则 list_dir 拿到 {content:[],total:0} 会把目录判为空，触发全量重传。
-            if path.startswith("/api/"):
+            # 变量名是 api_path（形参），这里曾写成 path —— 那个名字在函数里并不存在，
+            # 于是一旦走到这条分支就抛 NameError，被上层兜成 HTTP 500「服务器内部错误」，
+            # 注释里承诺的"报错说清原因"从来没生效过。
+            # status 0（curl 后端拿不到状态行）与 3xx（没跟随后仍返回）同样属于"不是正常响应"。
+            if api_path.startswith("/api/") or status <= 0 or 300 <= status < 400:
                 raise OpenlistError("非 OpenList 响应（HTTP %s，缺少 code 字段）：%s"
                                     % (status, raw[:200].decode("utf-8", "replace")),
                                     status=status, kind="business")
@@ -597,77 +670,156 @@ class OpenlistClient(object):
 
     # -- 任务管理（取消 / 删除 / 重试 / 清除） --
     # OpenList 任务 API（server/handles/task.go 的 taskRoute）：
-    #   POST /api/task/copy/cancel?tid=xxx      取消单个
-    #   POST /api/task/copy/delete?tid=xxx      删除单个
-    #   POST /api/task/copy/retry?tid=xxx       重试单个
-    #   POST /api/task/copy/cancel_some         批量取消（body 是 tid 数组）
-    #   POST /api/task/copy/delete_some         批量删除（body 是 tid 数组）
-    #   POST /api/task/copy/clear_done          清除已完成（成功/失败/取消）
-    # 注意：OpenList 没有「暂停」概念，只有取消。
+    #   POST /api/task/<type>/cancel?tid=xxx      取消单个
+    #   POST /api/task/<type>/delete?tid=xxx      删除单个
+    #   POST /api/task/<type>/retry?tid=xxx       重试单个
+    #   POST /api/task/<type>/cancel_some         批量取消（body {"tids": [...]}）
+    #   POST /api/task/<type>/delete_some         批量删除（body {"tids": [...]}）
+    #   POST /api/task/<type>/retry_failed        重试全部失败项
+    #   POST /api/task/<type>/clear_done          清除已完成（成功/失败/取消）
+    # 注意：OpenList **没有「暂停」概念**，只有取消。
+    #
+    # 批量接口的「HTTP 200」不代表成功 —— 见 parse_batch_errors()。历史缺陷就出在
+    # 这里：只要请求不抛异常就 `return len(tids)`，于是"一个都没取消"也会报
+    # "已取消 N 个"，用户点了「全部取消」，toast 说成功了，任务还在跑。
 
-    def cancel_task(self, tid):
-        """取消单个 OpenList copy 任务。返回是否成功。"""
+    def task_action(self, action, tid, task_type="copy", timeout=15):
+        """对**单个**任务执行 cancel / delete / retry，返回是否成功。
+
+        单条接口的语义比批量清楚：任务不存在时服务端会返回非 200 的 code，
+        `_request` 直接抛错，于是这里能给出确定的 False（而不是"HTTP 通了就算成"）。
+        """
+        tid = str(tid or "").strip()
+        if not tid:
+            return False
+        label = TASK_ACTION_LABELS.get(action, action)
         try:
-            self._request("POST", "/api/task/copy/cancel",
-                          query={"tid": str(tid)}, timeout=15)
+            self._request("POST", "/api/task/%s/%s" % (task_type, action),
+                          query={"tid": tid}, timeout=timeout)
             return True
         except Exception as exc:
-            self._log("取消 OpenList 任务失败（%s）：%s" % (tid, exc))
+            self._log("%s OpenList 任务失败（%s/%s）：%s" % (label, task_type, tid, exc))
             return False
 
-    def cancel_tasks(self, tids):
-        """批量取消 OpenList copy 任务。返回成功数。"""
-        tids = [str(t) for t in (tids or []) if t]
+    def cancel_task(self, tid, task_type="copy"):
+        return self.task_action("cancel", tid, task_type)
+
+    def delete_task(self, tid, task_type="copy"):
+        return self.task_action("delete", tid, task_type)
+
+    def retry_task(self, tid, task_type="copy"):
+        return self.task_action("retry", tid, task_type)
+
+    def batch_task_action(self, action, tids, task_type="copy"):
+        """批量执行任务动作，**逐条核实**结果。返回报告 dict：
+
+        ```
+        {"action", "taskType", "requested", "ok",
+         "failed": [{"id", "error"}], "unknown": [tid, ...]}
+        ```
+
+        语义约定（前端文案与测试都依赖它）：
+
+        * `ok` —— 批量接口明确报成功 + 逐条兜底成功的条数；
+        * `failed` —— 批量报错、逐条兜底也失败的 tid（原因照抄服务端）；
+        * `unknown` —— 批量接口没给逐条结果，且**没有**做逐条兜底，状态未知。
+          调用方必须回读任务列表来定论；绝不能把 unknown 算成成功。
+        """
+        tids = normalize_tids(tids)
+        report = {"action": action, "taskType": task_type, "requested": len(tids),
+                  "ok": 0, "failed": [], "unknown": []}
         if not tids:
-            return 0
-        try:
-            self._request("POST", "/api/task/copy/cancel_some",
-                          json_body=tids, timeout=30)
-            return len(tids)
-        except Exception as exc:
-            self._log("批量取消 OpenList 任务失败：%s" % exc)
-            # 退化成逐条取消
-            ok = 0
-            for t in tids:
-                if self.cancel_task(t):
-                    ok += 1
-            return ok
+            return report
+        label = TASK_ACTION_LABELS.get(action, action)
 
-    def delete_task(self, tid):
-        """删除单个 OpenList copy 任务。返回是否成功。"""
+        errors = None
         try:
-            self._request("POST", "/api/task/copy/delete",
-                          query={"tid": str(tid)}, timeout=15)
+            data = self._request("POST", "/api/task/%s/%s_some" % (task_type, action),
+                                 json_body={"tids": tids}, timeout=30)
+            errors = parse_batch_errors(data)
+            if errors is None:
+                self._log("OpenList 批量%s接口没有返回逐条结果（%s，%d 项），"
+                          "状态未知，交由调用方回读核实" % (label, task_type, len(tids)))
+        except Exception as exc:
+            self._log("批量%s OpenList 任务失败（%s，%d 项）：%s"
+                      % (label, task_type, len(tids), exc))
+            errors = dict((tid, str(exc)) for tid in tids)
+
+        if errors is None:
+            # 服务端没说哪些成功哪些失败 → 不猜，逐条兜底交给调用方的回读
+            report["unknown"] = list(tids)
+            return report
+
+        retry_ids = [tid for tid in tids if tid in errors]
+        report["ok"] = len(tids) - len(retry_ids)
+        for tid in retry_ids:
+            if self.task_action(action, tid, task_type):
+                report["ok"] += 1
+            else:
+                report["failed"].append({
+                    "id": tid,
+                    "error": errors.get(tid) or ("%s失败" % label),
+                })
+        return report
+
+    def cancel_tasks(self, tids, task_type="copy"):
+        """批量取消。返回 batch_task_action 的报告（**不是**成功数）。"""
+        return self.batch_task_action("cancel", tids, task_type=task_type)
+
+    def delete_tasks(self, tids, task_type="copy"):
+        """批量删除。返回 batch_task_action 的报告。"""
+        return self.batch_task_action("delete", tids, task_type=task_type)
+
+    def retry_tasks(self, tids, task_type="copy"):
+        """批量重试。返回 batch_task_action 的报告。"""
+        return self.batch_task_action("retry", tids, task_type=task_type)
+
+    def clear_done_tasks(self, task_type="copy"):
+        """清除某一类已完成的 OpenList 任务（成功/失败/取消）。返回是否成功。"""
+        try:
+            self._request("POST", "/api/task/%s/clear_done" % task_type, timeout=30)
             return True
         except Exception as exc:
-            self._log("删除 OpenList 任务失败（%s）：%s" % (tid, exc))
+            self._log("清除 OpenList 已完成任务失败（%s）：%s" % (task_type, exc))
             return False
 
-    def delete_tasks(self, tids):
-        """批量删除 OpenList copy 任务。返回成功数。"""
-        tids = [str(t) for t in (tids or []) if t]
-        if not tids:
-            return 0
-        try:
-            self._request("POST", "/api/task/copy/delete_some",
-                          json_body=tids, timeout=30)
-            return len(tids)
-        except Exception as exc:
-            self._log("批量删除 OpenList 任务失败：%s" % exc)
-            ok = 0
-            for t in tids:
-                if self.delete_task(t):
-                    ok += 1
-            return ok
+    def retry_failed_tasks(self, task_type="copy"):
+        """让服务端重试某一类任务里所有失败项。返回核算报告：
 
-    def clear_done_tasks(self):
-        """清除 OpenList 所有已完成的 copy 任务（成功/失败/取消）。返回是否成功。"""
+        ```
+        {"ok": bool, "taskType", "called": bool,
+         "failedBefore": int|None, "failedAfter": int|None,
+         "retried": int|None, "error": str}
+        ```
+
+        `retry_failed` **不返回重试条数**，只能做「调用前后各数一次 done 里的
+        失败项」的差。任一侧拿不到列表就把 `retried` 置 None —— 前端据此如实说
+        「已提交，条数无法核实」，绝不编一个数字出来。
+        """
+        report = {"ok": False, "taskType": task_type, "called": False,
+                  "failedBefore": None, "failedAfter": None,
+                  "retried": None, "error": ""}
+
+        before = self.list_tasks(task_type)
+        if before is not None:
+            report["failedBefore"] = count_failed_tasks(before.get("done"))
         try:
-            self._request("POST", "/api/task/copy/clear_done", timeout=30)
-            return True
+            self._request("POST", "/api/task/%s/retry_failed" % task_type, timeout=30)
         except Exception as exc:
-            self._log("清除 OpenList 已完成任务失败：%s" % exc)
-            return False
+            self._log("重试 OpenList 失败任务失败（%s）：%s" % (task_type, exc))
+            report["error"] = str(exc)
+            report["failedAfter"] = report["failedBefore"]
+            report["retried"] = 0 if report["failedBefore"] is not None else None
+            return report
+
+        report["ok"] = True
+        report["called"] = True
+        after = self.list_tasks(task_type)
+        if after is not None:
+            report["failedAfter"] = count_failed_tasks(after.get("done"))
+        if report["failedBefore"] is not None and report["failedAfter"] is not None:
+            report["retried"] = max(0, report["failedBefore"] - report["failedAfter"])
+        return report
 
     # -- 下载：云端 → 本地 --
 
@@ -712,11 +864,15 @@ class OpenlistClient(object):
         port_b = b.port or (443 if b.scheme == "https" else 80)
         return (a.hostname.lower(), port_a) == (b.hostname.lower(), port_b)
 
-    def _open_download(self, remote_path, part_size):
-        """打开下载流。401 时重登并重新取一次 raw_url（签名地址也会过期）。"""
+    def _open_download(self, remote_path, part_size, node=None):
+        """打开下载流。401 时重登并重新取一次 raw_url（签名地址也会过期）。
+
+        node：调用方已经查过 stat 时直接传进来，省掉一次往返。
+        """
         last_error = None
         for attempt in (0, 1):
-            node = self.stat(remote_path)
+            if node is None:
+                node = self.stat(remote_path)
             if node is None:
                 raise OpenlistError("云端找不到：%s" % remote_path)
             if node.get("is_dir"):
@@ -744,6 +900,7 @@ class OpenlistClient(object):
                 resp.close()
                 last_error = AuthError("下载被拒绝（HTTP %s）" % resp.status)
                 if attempt == 0 and self._relogin():
+                    node = None     # 重登后签名地址会变，必须重新查一次
                     continue
                 raise last_error
             if resp.status >= 400:
@@ -771,6 +928,7 @@ class OpenlistClient(object):
            写入字节不一致就报失败，绝不把残文件当成功。
         """
         part = local_path + ".ddpart"
+        meta_path = part + ".meta"
         parent = os.path.dirname(local_path)
         if parent:
             try:
@@ -778,24 +936,38 @@ class OpenlistClient(object):
             except OSError as exc:
                 raise OpenlistError("创建本地目录失败：%s（%s）" % (parent, exc))
 
+        # 续传前必须先确认「远端还是不是上次那个文件」。
+        # 只比对本地临时文件大小远远不够：上次中断后云端同名文件被换成同大小的
+        # 新内容时，旧写法会从旧的字节数接着写，最终拼出一个大小正确、内容错误的
+        # 文件并报成功（实测：残留 AAAAA + 新内容 BBBBBBBBBB → AAAAA BBBBB，
+        # 大小校验全过、os.replace 落地、任务标 done）。
+        # 证明不了是同一个文件就不续传 —— 宁可重下，也不产出坏文件。
+        node = self.stat(remote_path)
+        if node is None:
+            raise OpenlistError("云端找不到：%s" % remote_path)
+        if node.get("is_dir"):
+            raise OpenlistError("这是一个目录，不能直接下载：%s" % remote_path)
+
         done = 0
-        try:
-            if os.path.isfile(part):
+        if os.path.isfile(part):
+            try:
                 done = int(os.path.getsize(part))
-        except OSError:
-            done = 0
+            except OSError:
+                done = 0
+            if done and not self._part_meta_matches(meta_path, node, remote_path):
+                self._log("续传作废（无法确认云端文件仍是上次那个）：%s" % remote_path)
+                done = 0
 
         want = int(expected_size or 0)
         if done and want and done >= want:
             # 临时文件已经不比目标小：续传没有意义，重来一次更安全
             done = 0
         if not done:
-            try:
-                os.unlink(part)
-            except OSError:
-                pass
+            self._drop_part(part, meta_path)
 
-        resp, node = self._open_download(remote_path, done)
+        resp, node = self._open_download(remote_path, done, node=node)
+        # 真正开始写之前记下本次远端指纹：下次续传据此判断还能不能接着写。
+        self._write_part_meta(meta_path, remote_path, node)
         cloud_size = int(node.get("size") or 0)
         if not want:
             want = cloud_size
@@ -841,7 +1013,63 @@ class OpenlistClient(object):
             os.replace(part, local_path)
         except OSError as exc:
             raise OpenlistError("写入本地文件失败：%s（%s）" % (local_path, exc))
+        self._drop_part(None, meta_path)     # 落地成功，指纹没必要留着
         return {"size": written, "path": local_path}
+
+    # -- 断点续传指纹 --
+
+    @staticmethod
+    def _part_meta_matches(meta_path, node, remote_path=None):
+        """本地残留的半成品是否确实属于远端当前这个文件。
+
+        判据：
+        1. **必须有一份本次下载写下的指纹**（`*.ddpart.meta`）。老版本或别处
+           留下的裸半成品一律不续传 —— 谁也不知道它是不是同一个文件的头半截。
+        2. 指纹里的远程路径要对得上（同名不同目录的残留不能互相续传）。
+        3. 大小相等。
+        4. 双方都提供 modified 时必须相等；缺 modified（部分驱动不给）时只能
+           按大小判 —— 这条是历史能力的下限，不是新增风险：既然拿不到任何
+           版本标识，本来就没法区分"同尺寸新内容"，此时至少保证不是陌生残留。
+        """
+        import json as _json
+        try:
+            with open(meta_path, "r", encoding="utf-8") as fh:
+                meta = _json.load(fh)
+        except Exception:
+            return False
+        try:
+            if int(meta.get("size") or -1) != int(node.get("size") or 0):
+                return False
+            if remote_path is not None and str(meta.get("path") or "") != remote_path:
+                return False
+            old_modified = str(meta.get("modified") or "")
+            now_modified = str(node.get("modified") or "")
+            if old_modified and now_modified:
+                return old_modified == now_modified
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def _write_part_meta(meta_path, remote_path, node):
+        import json as _json
+        try:
+            with open(meta_path, "w", encoding="utf-8") as fh:
+                _json.dump({"path": remote_path,
+                            "size": int(node.get("size") or 0),
+                            "modified": str(node.get("modified") or "")}, fh)
+        except OSError:
+            pass
+
+    @staticmethod
+    def _drop_part(part, meta_path):
+        for p in (part, meta_path):
+            if not p:
+                continue
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
 
     # -- 删除 --
 

@@ -458,6 +458,8 @@ class BindingStore(object):
             "lastScannedAt": b.get("lastScannedAt", 0),
             "scanStatus": b.get("scanStatus", SCAN_IDLE),
             "scanError": b.get("scanError", ""),
+            # 「部分完成」的提示：有目录没读到，扫描结果不完整
+            "scanWarning": b.get("scanWarning", ""),
             "scanProgress": b.get("scanProgress") or {"phase": "idle", "scanned": 0, "current": ""},
             "scanStats": b.get("scanStats"),
             # 源目录里的文件总数（不是"待处理数"，待处理数在 missingCount）
@@ -533,7 +535,8 @@ class BindingStore(object):
                     b["snapshot"] = {}
                     b["lastScannedAt"] = 0
             if "cloudTargets" in data:
-                targets = self._normalize_targets(data.get("cloudTargets") or [])
+                targets = self._normalize_targets(data.get("cloudTargets") or [],
+                                                 existing=b.get("cloudTargets") or [])
                 if not targets:
                     raise ValueError("至少需要一个云端目录")
                 # 只有目标集合真的变了才作废扫描结果：编辑名称 / 开关自动上传
@@ -542,6 +545,10 @@ class BindingStore(object):
                     b["cloudTargets"] = targets
                     b["files"] = []
                     b["lastScannedAt"] = 0
+                    # 目标目录变了，快照里「某文件在某目标上已同步」的结论也跟着失效。
+                    # 只清 files 不清 snapshot 的话，同一批 target id（path 变了但 id
+                    # 被复用）会把旧结论搬到新目录 —— 界面显示"已同步"，新目录其实空的。
+                    b["snapshot"] = {}
             if "scanDepth" in data:
                 b["scanDepth"] = self._normalize_depth(data.get("scanDepth"))
             if "autoUpload" in data:
@@ -580,18 +587,35 @@ class BindingStore(object):
     # -- 目标 / 规则规范化 --
 
     @staticmethod
-    def _normalize_targets(targets_in):
+    def _normalize_targets(targets_in, existing=None):
+        """规范化云端目标列表。
+
+        `existing` 是当前绑定已有的目标。调用方（前端）通常只回传 path+enabled，
+        **不带 id** —— 早先这里一律 `_new_id("ct")`，导致每次保存 id 全变，
+        `_targets_equal` 永远判不相等，于是"只改个名字"也会把扫描结果清空
+        （实测 files 1 条 → 0 条、lastScannedAt 归零）。
+        现在：没给 id 时先按规范化后的 path 在旧目标里找，找到就沿用旧 id；
+        找不到（确实是新加的目录）才生成新 id。
+        """
+        by_path = {}
+        for old in (existing or []):
+            if isinstance(old, dict):
+                old_path = "/" + "/".join(
+                    p for p in str(old.get("path") or "").replace("\\", "/").split("/") if p)
+                if old.get("id"):
+                    by_path[old_path.lower()] = str(old["id"])
+
         out = []
         seen = set()
         for t in targets_in:
             if isinstance(t, str):
                 path = t.strip()
                 enabled = True
-                tid = _new_id("ct")
+                tid = ""
             elif isinstance(t, dict):
                 path = (t.get("path") or "").strip()
                 enabled = bool(t.get("enabled", True))
-                tid = t.get("id") or _new_id("ct")
+                tid = str(t.get("id") or "")
             else:
                 continue
             if not path:
@@ -603,6 +627,8 @@ class BindingStore(object):
             if key in seen:
                 continue
             seen.add(key)
+            if not tid:
+                tid = by_path.get(key) or _new_id("ct")
             out.append({"id": str(tid), "path": path, "enabled": enabled})
         return out
 
@@ -895,10 +921,27 @@ class BindingStore(object):
 
         # 1. 扫描 OpenList 源目录。源目录读不到就**别装作扫完了**：
         #    静默吞掉会让界面显示"已完全同步、无待处理"，而事实是根本没读到源。
+        #    但"某个子目录读不到"不该让整场扫描作废（本地扫描一直容许局部失败），
+        #    所以用 strict=False，把失败目录汇总成 scanWarning 如实告诉用户。
+        scan_warnings = []
+        b["scanWarning"] = ""
+        src_fatal = []
+
+        def _note_dir_error(abspath, rel, exc, side="云端", fatal=None):
+            scan_warnings.append("%s %s：%s" % (side, rel or "根目录", exc))
+            # 根目录读不到就不存在"部分完成"：一条都没读到，结论必然错，
+            # 必须走 scanStatus=error 那条路（子目录失败才可以容忍）。
+            if fatal is not None and not rel:
+                fatal.append(exc)
+
         _progress("source", 0, local_path)
         local_map = verify_mod.scan_cloud(
             self.client, local_path, depth, excludes, concurrency=scan_workers,
-            progress=lambda rel, cnt: _progress("source", cnt, rel))
+            progress=lambda rel, cnt: _progress("source", cnt, rel),
+            strict=False,
+            on_error=lambda p, rel, exc: _note_dir_error(p, rel, exc, "源目录", src_fatal))
+        if src_fatal:
+            raise RuntimeError("列云端目录失败（根目录）：%s" % src_fatal[0])
         if cancel_flag.is_set():
             return [], 0
 
@@ -961,11 +1004,17 @@ class BindingStore(object):
                     break
                 _progress("target", 0, "%s (%d/%d)" % (target.get("path"), ti+1, len(enabled_targets)))
                 try:
+                    tgt_fatal = []
                     target_maps[target["id"]] = verify_mod.scan_cloud(
                         self.client, target["path"], depth, excludes,
                         concurrency=scan_workers,
+                        strict=False,
+                        on_error=lambda p, rel, exc, t=target, f=tgt_fatal: _note_dir_error(
+                            p, rel, exc, "目标 %s" % t.get("path"), f),
                         progress=lambda rel, cnt, t=target: _progress(
                             "target", cnt, "%s: %s" % (t.get("path"), rel)))
+                    if tgt_fatal:
+                        raise RuntimeError("列云端目录失败（根目录）：%s" % tgt_fatal[0])
                 except Exception as exc:
                     # 单个目标扫描失败不阻塞其他目标
                     target_maps[target["id"]] = {"__error__": str(exc)}
@@ -1126,6 +1175,13 @@ class BindingStore(object):
         if b.get("sourceSnapshot") and not cancel_flag.is_set():
             b["snapshot"] = new_snapshot
             b["snapshotVersion"] = SNAPSHOT_VERSION
+        # 有目录没读到就如实标出来：这类"部分完成"的扫描结果不能当成完整的同步结论。
+        if scan_warnings:
+            head = scan_warnings[0]
+            more = len(scan_warnings) - 1
+            b["scanWarning"] = head + ("（另有 %d 个目录同样失败）" % more if more > 0 else "")
+            self._log("绑定「%s」扫描有 %d 个目录读取失败，已跳过并继续：%s"
+                      % (b.get("name"), len(scan_warnings), head))
         return files, total_source
 
     def _cloud_entry(self, cloud_map, rel_path, target):
@@ -1317,16 +1373,26 @@ class BindingStore(object):
 
     @staticmethod
     def _calc_scan_stats(files, total_source):
-        """计算扫描结果统计：缺失、不一致、已同步、待处理、在途数量。"""
+        """计算扫描结果统计：缺失、不一致、已同步、待处理、在途数量。
+
+        **口径必须统一到「文件」**：`total_source` 是文件数，`pending` 也是文件数，
+        所以 `inflight` / `synced` 同样按文件算。早先 `inflight` 在目标循环里
+        累加（一个文件传向两个目标算 2），却直接拿去和文件数相减 —— 实测
+        「1 个文件、2 个目标都在传」得到 `inflight=2, synced=0`，界面显示
+        「传输中 2、已同步 0」，实际是「1 个在传、其余已同步」。
+        按目标的明细单独放 `inflightTargets`，需要时再展示。
+        """
         missing = 0
         mismatch = 0
         uploaded = 0
-        inflight = 0
+        inflight_targets = 0
         failed = 0
         pending = 0
+        inflight = 0
         for f in files:
             targets = f.get("targets") or {}
             file_pending = False
+            file_inflight = False
             for s in targets.values():
                 st = s.get("status")
                 if st == ST_MISSING:
@@ -1338,14 +1404,18 @@ class BindingStore(object):
                 elif st in SETTLED_STATES:
                     uploaded += 1
                 elif st in IN_FLIGHT_STATES:
-                    inflight += 1
+                    inflight_targets += 1
+                    file_inflight = True
                 elif st == ST_FAILED:
                     failed += 1
                     file_pending = True
             if file_pending:
                 pending += 1
-        # 已同步的文件不在 files 列表里（只保留待处理和在途），
-        # 所以已同步数 = 源文件总数 - 待处理数 - 在途数
+            elif file_inflight:
+                inflight += 1
+        # 已同步的文件不在 files 列表里（列表只留待处理和在途），
+        # 所以已同步数 = 源文件总数 - 待处理文件数 - 在途文件数。
+        # 同一个文件既有待处理目标又在传时只算进 pending，避免重复相减。
         synced = max(0, total_source - pending - inflight)
         return {
             "total": total_source,
@@ -1353,6 +1423,7 @@ class BindingStore(object):
             "mismatch": mismatch,
             "failed": failed,
             "inflight": inflight,
+            "inflightTargets": inflight_targets,
             "pending": pending,
             "synced": synced,
         }
@@ -1517,12 +1588,16 @@ class BindingStore(object):
                 # 判断"目标已存在"：必须是明确的冲突错误，不能用 "exist" 子串
                 # （"does not exist" / "path not exist" / "failed get ... not exist"
                 #  也包含 exist，但含义是源/父目录不存在，当成跳过成功会静默丢数据）
+                # `code == 403` **不能**算冲突：OpenList 的业务错误常是 HTTP 200 +
+                # code 403，它同时代表权限不足 / 只读挂载 / 配额不足。早先把它当
+                # "已存在"，于是整批文件被记成"已提交"，实际一个字节都没复制，
+                # 界面要等 30 分钟超时才回落成"不一致"。403 一律按失败如实报。
                 is_conflict = (
                     "already exist" in msg
                     or "file exists" in msg
                     or "文件已存在" in str(exc)
                     or "目标已存在" in str(exc)
-                    or (hasattr(exc, "code") and exc.code in (403, 409))
+                    or (hasattr(exc, "code") and exc.code == 409)
                 )
                 is_not_exist = (
                     "does not exist" in msg

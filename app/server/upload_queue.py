@@ -324,15 +324,35 @@ class UploadQueue(object):
             self._workers.append(th)
         self._log("上传队列已启动（%d 个并发）" % workers)
 
-    def stop(self):
+    def stop(self, timeout=30):
+        """停队列。返回是否所有 worker 都已真的退出。
+
+        为什么要返回、且不能在 join 超时后继续清理：`reset_queue`（改并发/重试数）
+        走的就是这条路径。若某个 worker 卡在长请求里 5 秒还没退，旧实现照样把
+        `_workers` 清空、`_running` 清空，然后 `save(force=True)` —— 之后
+        ① 新队列 load 同一份 queue.json，旧 worker 传完再 save 一次，
+        用它的旧列表把新队列刚写入的状态覆盖掉（新加的任务直接消失）；
+        ② 认领表被清空，同一个文件可能被新旧两个 worker 同时上传。
+        所以未全部退出时**保留认领表**并把调用方挡住。
+        """
         self._stop.set()
         self._wake.set()        # 让空转的 worker 立刻醒来退出，不用干等轮询周期
+        alive = []
         for th in self._workers:
-            th.join(timeout=5)
+            th.join(timeout=timeout)
+            if th.is_alive():
+                alive.append(th)
+        if alive:
+            self._log("上传队列停止超时：仍有 %d 个 worker 未退出（%s），保留认领表"
+                      % (len(alive), ", ".join(t.name for t in alive)))
+            self._workers = alive
+            self.save(force=True)
+            return False
         self._workers = []
         with self._lock:
             self._running.clear()   # worker 都退了，认领表必须清空
         self.save(force=True)
+        return True
 
     def is_running(self):
         return bool(self._workers)
@@ -400,8 +420,16 @@ class UploadQueue(object):
         return self._paused.is_set()
 
     def cancel_all(self):
+        """取消全部未结束任务，**并解除暂停**。
+
+        解除暂停是必须的：用户点完「全部取消」最自然的下一步就是「重试」，
+        而暂停态下 worker 根本不取任务 —— 点了重试什么都不会发生，看起来像
+        「取消之后整个队列死掉了」。取消本来就已经把在跑的停下来了，解除暂停
+        不存在"偷偷继续传"的风险。
+        """
         n = 0
         with self._lock:
+            was_paused = self._paused.is_set()
             for t in self._tasks:
                 st = t.get("status")
                 if st in (PENDING, UPLOADING, VERIFYING):
@@ -412,9 +440,16 @@ class UploadQueue(object):
                         flag = self._cancel_flags.setdefault(t["id"], threading.Event())
                         flag.set()
                     n += 1
-        if n:
+        if was_paused:
+            self._paused.clear()
+        if n or was_paused:
             self.save(force=True)
+            # 解除暂停后要让空转的 worker 立刻醒来（否则要等下一个轮询周期）
+            self._wake_workers()
+        if n:
             self._log("全部取消：%d 个任务" % n)
+        if was_paused:
+            self._log("全部取消同时解除了暂停")
         return n
 
     def _worker_loop(self):
@@ -470,9 +505,17 @@ class UploadQueue(object):
             if self._skip_existing_enabled(task):
                 try:
                     node = self.client.stat(remote)
-                    if node and not node.get("is_dir") \
-                            and int(node.get("size") or 0) == int(task["size"]):
-                        self._set(task, status=SKIPPED, uploaded=task["size"],
+                    # 大小要用**此刻的本地文件**，不能用入队时的 task["size"]。
+                    # 入队后源文件被改写过、而云端旧文件大小恰好等于旧 size 时，
+                    # 用旧 size 会判成「已存在」跳过，新内容从来没传上去。
+                    try:
+                        size_now = int(os.path.getsize(local))
+                    except OSError:
+                        size_now = None
+                    if node and not node.get("is_dir") and size_now is not None \
+                            and int(node.get("size") or 0) == size_now:
+                        self._set(task, status=SKIPPED, uploaded=size_now,
+                                  size=size_now,
                                   finishedAt=int(time.time()))
                         self.save(force=True)
                         self._log("跳过已存在：%s" % remote)
@@ -567,9 +610,13 @@ class UploadQueue(object):
 
         # 4xx 错误（路径冲突/权限/参数错误）重试无意义，直接失败。
         # 否则白占 worker + 误导用户（退避 6 秒后还是同样的错）。
-        status = getattr(exc, "status", None) or getattr(exc, "code", None)
-        if isinstance(status, int) and 400 <= status < 500:
-            retryable = False
+        # 注意**先看 `code` 再看 `status`**：OpenList 的业务错误是 `HTTP 200 + code 403/404`，
+        # 早先写 `status or code` 会先取到 200，于是这条分支永远不生效，
+        # 权限不足/路径不存在这类必败的错误也要退避重试满次数。
+        for value in (getattr(exc, "code", None), getattr(exc, "status", None)):
+            if isinstance(value, int) and 400 <= value < 500:
+                retryable = False
+                break
 
         # 取消优先于重试：用户点了取消就不该再自己跑起来。
         # （旧实现先把状态改成 pending 再检查旗标，旗标命中后只是提前结束等待，

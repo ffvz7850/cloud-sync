@@ -243,6 +243,50 @@ _OPENER = None
 _OPENER_LOCK = threading.Lock()
 
 
+def _origin_of(url):
+    """(host, port) 小写化，用来判断两个 URL 是否同源。"""
+    from urllib.parse import urlsplit
+    try:
+        parts = urlsplit(url)
+    except Exception:
+        return None
+    if not parts.hostname:
+        return None
+    port = parts.port or (443 if (parts.scheme or "").lower() == "https" else 80)
+    return (parts.hostname.lower(), port)
+
+
+class _SafeRedirectHandler(object):
+    """跨域重定向时剥掉 `Authorization` / `Cookie` 的 handler 工厂。
+
+    为什么要自己做：urllib 的默认重定向**只剥 content-length / content-type**，
+    `Authorization` 会原样带到新地址。OpenList 给的 raw_url 是同源签名地址，
+    服务端常常 302 到对象存储（阿里/百度等第三方域名），于是本站 token
+    就落进了别人的访问日志。实测确认：目标服务端确实收到了这个头。
+
+    同源重定向保持原样（登录跳转之类还要靠它）。
+    """
+
+    @staticmethod
+    def build():
+        import urllib.request
+
+        class Handler(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                new = urllib.request.HTTPRedirectHandler.redirect_request(
+                    self, req, fp, code, msg, headers, newurl)
+                if new is not None and _origin_of(newurl) != _origin_of(req.full_url):
+                    for key in list(new.headers.keys()):
+                        if key.lower() in ("authorization", "cookie"):
+                            del new.headers[key]
+                    for key in list(getattr(new, "unredirected_hdrs", {}).keys()):
+                        if key.lower() in ("authorization", "cookie"):
+                            del new.unredirected_hdrs[key]
+                return new
+
+        return Handler
+
+
 def _plain_opener():
     """复用同一个 opener：build_opener 每次都要装配一遍 handler 链，
     扫描时被放大到上千次，没必要。显式清空代理是为了绕开开发机上
@@ -252,7 +296,9 @@ def _plain_opener():
         with _OPENER_LOCK:
             if _OPENER is None:
                 import urllib.request
-                _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                _OPENER = urllib.request.build_opener(
+                    urllib.request.ProxyHandler({}),
+                    _SafeRedirectHandler.build())
     return _OPENER
 
 

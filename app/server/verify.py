@@ -224,18 +224,21 @@ def scan_local(root, depth=3, excludes=DEFAULT_EXCLUDES):
 # --------------------------------------------------------------------------
 
 def scan_cloud(client, root_path, depth=3, excludes=DEFAULT_EXCLUDES, progress=None,
-               concurrency=None):
+               concurrency=None, strict=True, on_error=None):
     """扫描云端目录。
 
-    返回 `{相对路径: node}`，node 是 OpenList 的条目（含 name/size/is_dir/modified）。
-    root_path 是云端绝对路径（"/" 开头）。rel 相对 root_path。
+    strict=True（默认）：任一层目录列不出来就抛 RuntimeError，整次扫描作废。
+    用在「比对 / 下载整个目录」这类**结论必须完整**的地方 —— 少扫一层就会
+    把已存在的文件判成缺失。
+
+    strict=False：列出错的目录跳过，继续扫能读的，错误交给 `on_error(abs_path, rel, exc)`。
+    用在绑定同步的扫描上：一个无权限/被限流的子目录不该让整场备份白跑
+    （本地扫描一直是这么做的，两侧口径此前不一致）。
 
     并发策略：**同一层的目录并发列，层与层之间串行**。
-    原来的写法是逐目录递归、一个目录一次 HTTP 请求且完全串行 —— D 个目录就是
-    D 次往返，深度 3、每层几十个目录时，光网络往返就能到几十秒。层内并发能把
-    它压成大约「轮数 × ⌈同层目录数 / 并发数⌉」次往返，实测快 5 倍以上。
-    之所以不做「递归全并发」：那会瞬间产生成百上千个线程，在 NAS 上得不偿失，
-    而且层与层之间本来就有依赖，强行并发只会放大错误处理复杂度。
+    逐目录递归 + 完全串行时，D 个目录就是 D 次往返，深度 3、每层几十个目录时
+    光网络往返就能到几十秒；层内并发能压成大约「轮数 × ⌈同层目录数 / 并发数⌉」次。
+    不做「递归全并发」：那会瞬间产生成百上千个线程，NAS 上得不偿失。
     """
     out = {}
     depth = max(0, int(depth or 0))
@@ -253,13 +256,22 @@ def scan_cloud(client, root_path, depth=3, excludes=DEFAULT_EXCLUDES, progress=N
         listed = map_concurrent(lambda p: _list_dir_safe(client, p), paths, workers)
 
         for (abs_path, rel, level), result in zip(batch, listed):
+            children, error = None, None
             if isinstance(result, BaseException):
-                raise RuntimeError("列云端目录失败（%s）：%s"
-                                   % (rel or "根目录", result))
-            children, error = result
+                error = result
+            else:
+                children, error = result
             if error is not None:
-                raise RuntimeError("列云端目录失败（%s）：%s"
-                                   % (rel or "根目录", error))
+                if strict:
+                    raise RuntimeError("列云端目录失败（%s）：%s"
+                                       % (rel or "根目录", error))
+                # 容忍：记下错误，跳过这一层（已经扫到的条目照样返回）
+                if on_error:
+                    try:
+                        on_error(abs_path, rel, error)
+                    except Exception:
+                        pass
+                continue
 
             if progress:
                 progress(rel, len(out))

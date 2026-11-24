@@ -176,8 +176,11 @@ function makeBackend(overrides) {
       case "api/upload/retry": {
         state.retryPayload = JSON.parse(init.body);
         if (state.retryPayload && state.retryPayload.all) {
-          const nf = state.tasks.filter((t) => t.status === "failed").length;
-          return { ok: true, retried: nf };
+          const nf = state.tasks.filter((t) => t.status === "failed" && !t.isRecord).length;
+          // v2.15.40：后端会把 OpenList 的失败项一起重试，分项计数照实回传
+          return { ok: true, retried: nf,
+                   openlistRetried: state.openlistRetried || 0,
+                   openlistRetriedKnown: true };
         }
         return { ok: true };
       }
@@ -2426,6 +2429,237 @@ async function testScanConcurrencySettingV285() {
   win.close();
 }
 
+/* =========================================================================
+ * v2.15.40 传输列表：OpenList 单条动作 / 全部重试 / 传输记录
+ * ====================================================================== */
+
+/** 让 `/api/openlist/tasks` 返回指定任务的桩（默认桩对它一律 404）。 */
+function withOpenListTasks(tasks, extra) {
+  return makeBackend(Object.assign({
+    "api/openlist/tasks": () => ({ ok: true, tasks: tasks }),
+  }, extra || {}));
+}
+
+/**
+ * 用户报障：「传输列表的全部暂停和全部取消不生效」，其中一半是——OpenList
+ * 类型的任务行**一个按钮都没有**，只显示一个「OpenList 任务」文字标签。
+ */
+async function testOpenListTaskActionsV21540() {
+  console.log("\n[v2.15.40 · OpenList 任务行有取消/重试/删除]");
+  const tasks = [
+    { id: "ol_t1", name: "copying.mkv", remotePath: "OpenList 服务端复制",
+      size: 0, uploaded: 0, status: "uploading", progress: 0,
+      isOpenList: true, openListId: "t1" },
+    { id: "ol_t2", name: "failed.mkv", remotePath: "OpenList 服务端复制",
+      size: 0, uploaded: 0, status: "failed", error: "boom",
+      isOpenList: true, openListId: "t2" },
+    { id: "ol_t3", name: "done.mkv", remotePath: "OpenList 服务端复制",
+      size: 0, uploaded: 0, status: "done", progress: 100,
+      isOpenList: true, openListId: "t3" },
+  ];
+  const backend = withOpenListTasks(tasks);
+  const env = makeWindow({ backend });
+  await flush();
+  const doc = env.document;
+
+  const rowOf = (name) => Array.from(doc.querySelectorAll("#queueBody .qrow"))
+    .find((r) => r.querySelector(".qn").textContent.indexOf(name) >= 0);
+  const btnOf = (name, text) => Array.from(rowOf(name).querySelectorAll(".linkbtn"))
+    .find((b) => b.textContent === text);
+
+  eq("三行都渲染出来", doc.querySelectorAll("#queueBody .qrow").length, 3);
+  check("进行中的 OpenList 任务有「取消」按钮", !!btnOf("copying.mkv", "取消"),
+        (rowOf("copying.mkv") || {}).textContent);
+  check("失败的 OpenList 任务有「重试」按钮", !!btnOf("failed.mkv", "重试"));
+  check("失败的 OpenList 任务也能「删除」", !!btnOf("failed.mkv", "删除"));
+  check("已完成的 OpenList 任务有「删除」按钮", !!btnOf("done.mkv", "删除"));
+  check("不再只显示「OpenList 任务」文字标签",
+        doc.getElementById("queueBody").textContent.indexOf("OpenList 任务") < 0,
+        doc.getElementById("queueBody").textContent);
+
+  const clickAndGet = async (name, text, path) => {
+    btnOf(name, text).dispatchEvent(new env.window.MouseEvent("click", { bubbles: true }));
+    await flush();
+    return env.backend.state.calls.filter((c) => c.url.endsWith(path)).pop();
+  };
+
+  const cancelCall = await clickAndGet("copying.mkv", "取消", "/api/openlist/task/cancel");
+  check("取消打到 /api/openlist/task/cancel", !!cancelCall,
+        JSON.stringify(env.backend.state.calls.map((c) => c.url)));
+  eq("取消请求体带 ol_ 开头的任务 id", cancelCall && cancelCall.body && cancelCall.body.id, "ol_t1");
+
+  const retryCall = await clickAndGet("failed.mkv", "重试", "/api/openlist/task/retry");
+  check("重试打到 /api/openlist/task/retry", !!retryCall);
+  eq("重试请求体带任务 id", retryCall && retryCall.body && retryCall.body.id, "ol_t2");
+
+  const delCall = await clickAndGet("done.mkv", "删除", "/api/openlist/task/delete");
+  check("删除打到 /api/openlist/task/delete", !!delCall);
+  eq("删除请求体带任务 id", delCall && delCall.body && delCall.body.id, "ol_t3");
+  env.window.close();
+}
+
+/**
+ * 用户原话：「对应 openlist 的缺少没有全部重试失败项按钮」。
+ * 本地 0 失败 + OpenList 有失败时，按钮必须可见，且点击要提交 {all:true}
+ * （后端会把 OpenList 的失败项一起重试），toast 要分项回报。
+ */
+async function testRetryAllWithOpenListFailuresV21540() {
+  console.log("\n[v2.15.40 · 只剩 OpenList 失败时「全部重试」可见且有效]");
+  const backend = withOpenListTasks([
+    { id: "ol_f1", name: "bad.mkv", remotePath: "OpenList 服务端复制",
+      size: 0, uploaded: 0, status: "failed", error: "磁盘满",
+      isOpenList: true, openListId: "f1" },
+  ]);
+  // 后端会报「OpenList 重试了 1 个失败项」
+  backend.state.openlistRetried = 1;
+  const env = makeWindow({ backend });
+  await flush();
+  const doc = env.document;
+  // 本地队列为空（默认桩 tasks=[]），失败项只来自 OpenList
+  eq("本地队列里没有任务", backend.state.tasks.length, 0);
+  check("OpenList 有失败项时「全部重试」可见",
+        !doc.getElementById("btnRetryAll").classList.contains("hidden"),
+        doc.getElementById("btnRetryAll").className);
+
+  doc.getElementById("btnRetryAll").dispatchEvent(
+    new env.window.MouseEvent("click", { bubbles: true }));
+  await flush();
+  const body = backend.state.retryPayload;
+  check("点击提交 {all:true}（后端据此把 OpenList 失败项一起重试）",
+        !!(body && body.all === true), JSON.stringify(body));
+  const toastText = doc.getElementById("toast").textContent;
+  check("toast 说明 OpenList 也重试了",
+        toastText.indexOf("OpenList") >= 0 && toastText.indexOf("已重新加入") >= 0,
+        toastText);
+  env.window.close();
+}
+
+/**
+ * 用户原话：「如果是本地传本地，传输列表不显示文件」。
+ * 本地复制 / 同存储云端复制不产生任务，只落一条「传输记录」（isRecord）。
+ */
+async function testTransferRecordRowsV21540() {
+  console.log("\n[v2.15.40 · 传输记录行：本地复制 / 云端同步复制]");
+  const backend = makeBackend();
+  backend.state.tasks = [
+    { id: "lc_abc", name: "from", srcPath: "/vol1/1000/from",
+      dstPath: "/vol1/1000/to/from", size: 0, isDir: true, status: "done",
+      kind: "local", direction: "localcopy", isRecord: true },
+    { id: "olc_def", name: "a.mkv", srcPath: "/src/a.mkv", dstPath: "/dst/a.mkv",
+      size: 2048, isDir: false, status: "done", kind: "cloud",
+      direction: "cloudcopy", isRecord: true },
+    { id: "olc_bad", name: "b.mkv", srcPath: "/src/b.mkv", dstPath: "/dst/b.mkv",
+      size: 0, isDir: false, status: "failed", error: "目标目录不可写",
+      kind: "cloud", direction: "cloudcopy", isRecord: true },
+    // 路径里带尖括号：必须被 esc() 转义，不能当 HTML 注入
+    { id: "lc_xss", name: "evil", srcPath: "/vol1/1000/<img src=x>",
+      dstPath: "/vol1/1000/to/evil", size: 0, isDir: true, status: "done",
+      kind: "local", direction: "localcopy", isRecord: true },
+  ];
+  const env = makeWindow({ backend });
+  await flush();
+  const doc = env.document;
+  const rows = Array.from(doc.querySelectorAll("#queueBody .qrow"));
+  eq("四条记录都渲染成行", rows.length, 4);
+
+  const rowOf = (name) => rows.find((r) => r.querySelector(".qn").textContent.indexOf(name) >= 0);
+  const local = rowOf("from");
+  check("本地复制行的副行显示「源 → 目标」两个路径",
+        local.textContent.indexOf("/vol1/1000/from") >= 0 &&
+        local.textContent.indexOf("→") >= 0 &&
+        local.textContent.indexOf("/vol1/1000/to/from") >= 0,
+        local.textContent);
+  eq("目录大小显示「目录」而不是 0 B",
+     Array.from(local.children)[2].textContent, "目录");
+  check("状态显示「本地复制完成」", local.textContent.indexOf("本地复制完成") >= 0,
+        local.textContent);
+  check("记录行不画进度条（它没有进度可言）", !local.querySelector(".prog"));
+
+  const cloud = rowOf("a.mkv");
+  check("云端同步复制行显示「云端复制完成」",
+        cloud.textContent.indexOf("云端复制完成") >= 0, cloud.textContent);
+  eq("文件大小照实显示", Array.from(cloud.children)[2].textContent, "2.0 KB");
+
+  const failed = rowOf("b.mkv");
+  check("失败记录显示失败原因", failed.textContent.indexOf("目标目录不可写") >= 0,
+        failed.textContent);
+
+  check("记录行只给「删除」，不给重试",
+        Array.from(local.querySelectorAll(".linkbtn")).map((b) => b.textContent).join(",") === "删除",
+        local.textContent);
+
+  const xss = rowOf("evil");
+  check("路径里的尖括号被转义，没有真的插入元素",
+        !xss.querySelector("img") && xss.textContent.indexOf("<img src=x>") >= 0,
+        xss.innerHTML);
+
+  // 点「删除」→ 打 /api/upload/remove，带记录 id
+  const delBtn = Array.from(local.querySelectorAll(".linkbtn"))
+    .find((b) => b.textContent === "删除");
+  delBtn.dispatchEvent(new env.window.MouseEvent("click", { bubbles: true }));
+  await flush();
+  const call = env.backend.state.calls.filter((c) => c.url.endsWith("/api/upload/remove")).pop();
+  check("删除打到 /api/upload/remove", !!call);
+  eq("删除请求体带记录 id", call && call.body && call.body.id, "lc_abc");
+
+  check("仅记录行有失败时「全部重试」不显示（记录没法重试）",
+        doc.getElementById("btnRetryAll").classList.contains("hidden"),
+        doc.getElementById("btnRetryAll").className);
+  env.window.close();
+}
+
+/** 暂停只对本地队列生效：toast 必须说清 OpenList 不支持暂停。 */
+async function testPauseToastMentionsOpenListV21540() {
+  console.log("\n[v2.15.40 · 暂停只作用于本地队列]");
+  const backend = makeBackend();
+  const env = makeWindow({ backend });
+  await flush();
+  const doc = env.document;
+  await doc.getElementById("btnPause").onclick();
+  await flush();
+  const text = doc.getElementById("toast").textContent;
+  check("toast 说明 OpenList 任务不支持暂停",
+        text.indexOf("OpenList") >= 0 && text.indexOf("全部取消") >= 0, text);
+  const last = backend.state.calls.filter((c) => c.url.includes("/api/upload/pause")).pop();
+  eq("暂停请求体 paused=true", last.body.paused, true);
+  check("暂停请求不再带「顺手取消 OpenList 任务」的痕迹",
+        last.body.openlistPendingCancelled === undefined,
+        JSON.stringify(last.body));
+  env.window.close();
+}
+
+/**
+ * R06：OpenList 任务一旦 `total_bytes>0` 就走百分比分支（不是 indeterminate），
+ * 而它的 `uploaded` 恒为 0、进度全在 `progress` 里。指纹里漏了 `progress`
+ * 就会「画一次就冻住」——用户看到的是"卡住不动"，比没进度条更糟。
+ */
+async function testQueueSigTracksProgressV21540() {
+  console.log("\n[v2.15.40 · 队列指纹包含 progress/size]");
+  const tasks = [
+    { id: "ol_t1", name: "up.mkv", remotePath: "OpenList 服务端复制",
+      size: 2048, uploaded: 0, progress: 10, status: "uploading",
+      isOpenList: true, openListId: "t1" },
+  ];
+  const backend = withOpenListTasks(tasks);
+  const env = makeWindow({ backend });
+  await flush();
+  const win = env.window, doc = env.document;
+  const bar = () => doc.querySelector("#queueBody .prog i");
+  check("带 size 的 OpenList 任务画百分比进度条", !!bar());
+  eq("进度条宽度取自 progress", bar() && bar().style.width, "10%");
+
+  const body = doc.getElementById("queueBody");
+  const first = body.firstElementChild;
+  // 只改 progress，其它字段一个都不动
+  tasks[0].progress = 70;
+  await win.loadTasks();
+  await flush();
+  check("只有 progress 变化也要重绘", body.firstElementChild !== first,
+        "指纹没含 progress 时这里会保持同一个节点");
+  eq("重绘后进度条走到 70%", bar() && bar().style.width, "70%");
+  win.close();
+}
+
 async function main() {
   console.log("前端测试 v2.0（jsdom，严格网关桩：只放行 /app/" + APP + "/）");
   const cases = [
@@ -2496,6 +2730,12 @@ async function main() {
     testAdaptiveTaskPollingV285,
     testQueueRedrawFingerprintV285,
     testScanConcurrencySettingV285,
+    // v2.15.40 传输列表：OpenList 单条动作 / 全部重试 / 传输记录
+    testOpenListTaskActionsV21540,
+    testRetryAllWithOpenListFailuresV21540,
+    testTransferRecordRowsV21540,
+    testPauseToastMentionsOpenListV21540,
+    testQueueSigTracksProgressV21540,
   ];
   for (const fn of cases) {
     try {

@@ -67,8 +67,14 @@ CLOUD = {
 }
 
 COPIED = []          # 服务端收到的 copy 请求
-COPY_TASKS = []      # 尚未完成的任务
-DONE_TASKS = []      # 已完成的任务
+COPY_TASKS = []      # 尚未完成的 copy 任务（/api/task/copy/undone）
+DONE_TASKS = []      # 已完成的 copy 任务（/api/task/copy/done）
+UPLOAD_TASKS = []    # 尚未完成的 upload 任务（/api/task/upload/undone）
+UPLOAD_DONE = []     # 已完成的 upload 任务
+# 「永远取消不掉」的 tid：用来验证「取消不掉时如实报残留」，而不是谎报成功。
+STUCK_TIDS = set()
+# 收到过哪些任务接口调用（断言"该打的接口真的打了"）
+TASK_CALLS = []
 BAD = []             # 形状不对的请求
 
 # 云端文件的真实字节。CLOUD 里只有 size，下载链路必须能拿到真数据，
@@ -209,6 +215,100 @@ def make_ol_handler():
                 return False
             return True
 
+        # -- 后台任务（/api/task/<type>/<action>） ------------------------
+        # 这里的语义必须与真实 OpenList 一致，差一条就会掩盖真缺陷：
+        #   * 批量接口（cancel_some / delete_some）**永远返回 HTTP 200 + code
+        #     200**，每个 tid 的结果放在 data 里（成功 null / 失败一句原因）；
+        #   * 只有**真的存在**的 tid 才会被取消/删除；
+        #   * 单条接口对不存在的 tid 返回 404。
+        # 旧版这里对这些路径**完全没有实现**（一律 404）—— 这正是
+        # 「全部取消不生效」一年多没被发现的原因：客户端把 404 当成了"没有任务"。
+
+        @staticmethod
+        def _task_buckets(task_type):
+            if task_type == "upload":
+                return UPLOAD_TASKS, UPLOAD_DONE
+            return COPY_TASKS, DONE_TASKS
+
+        def _cancel_one(self, undone, done, tid):
+            for task in list(undone):
+                if str(task.get("id")) == tid:
+                    if tid in STUCK_TIDS:
+                        return "task is stuck"
+                    undone.remove(task)
+                    done.append(dict(task, state=4))
+                    return None
+            return "task not found"
+
+        def _delete_one(self, undone, tid):
+            for task in list(undone):
+                if str(task.get("id")) == tid:
+                    undone.remove(task)
+                    return None
+            return "task not found"
+
+        def _serve_task(self, path, body):
+            from urllib.parse import parse_qs, urlsplit
+            rest = path[len("/api/task/"):].split("/")
+            task_type = rest[0] if rest else ""
+            action = rest[1] if len(rest) > 1 else ""
+            if task_type not in ("copy", "upload"):
+                return self._send({"code": 404,
+                                   "message": "unknown task type %s" % task_type})
+            undone, done = self._task_buckets(task_type)
+            tid = (parse_qs(urlsplit(self.path).query).get("tid") or [""])[0]
+
+            if action in ("cancel", "delete", "retry"):
+                TASK_CALLS.append("%s:%s" % (action, tid))
+                if action == "retry":
+                    exists = any(str(t.get("id")) == tid for t in undone + done)
+                    err = None if exists else "task not found"
+                elif action == "cancel":
+                    err = self._cancel_one(undone, done, tid)
+                else:
+                    err = self._delete_one(undone, tid)
+                if err:
+                    return self._send({"code": 404, "message": err, "data": None}, 404)
+                return self._send({"code": 200, "message": "success", "data": None})
+
+            if action == "retry_failed":
+                TASK_CALLS.append("retry_failed:%s" % task_type)
+                keep = []
+                for task in done:
+                    if int(task.get("state") or 0) in (5, 6, 7):
+                        undone.append(dict(task, state=0))
+                    else:
+                        keep.append(task)
+                done[:] = keep
+                return self._send({"code": 200, "message": "success", "data": None})
+
+            if action == "clear_done":
+                TASK_CALLS.append("clear_done:%s" % task_type)
+                done[:] = []
+                return self._send({"code": 200, "message": "success", "data": None})
+
+            tids = body.get("tids") if isinstance(body, dict) else None
+            if not isinstance(tids, list):
+                # 真实服务端期望 BatchReq {tids:[...]}；发裸数组是历史缺陷
+                BAD.append("批量任务接口的 body 不是 {tids:[...]}：%r" % (body,))
+                tids = []
+
+            if action in ("cancel_some", "delete_some"):
+                TASK_CALLS.append("%s:%s" % (action, task_type))
+                errors = {}
+                for item in tids:
+                    item = str(item)
+                    if action == "cancel_some":
+                        errors[item] = self._cancel_one(undone, done, item)
+                    else:
+                        errors[item] = self._delete_one(undone, item)
+                # 真实 OpenList 的 getBatchHandler：**永远 200**，结果在 data 里
+                return self._send({"code": 200, "message": "success",
+                                   "data": errors})
+
+            return self._send({"code": 404,
+                               "message": "unknown task action %s" % action})
+
         def do_GET(self):
             path = self.path.split("?")[0]
             if path == "/api/public/settings":
@@ -220,10 +320,14 @@ def make_ol_handler():
             if path == "/api/me":
                 return self._send({"code": 200, "data": {
                     "username": "admin", "base_path": "/", "permission": 7}})
-            if path == "/api/task/copy/undone":
-                return self._send({"code": 200, "data": COPY_TASKS})
-            if path == "/api/task/copy/done":
-                return self._send({"code": 200, "data": DONE_TASKS})
+            if path.startswith("/api/task/"):
+                bits = path[len("/api/task/"):].split("/")
+                task_type = bits[0] if bits else ""
+                task_action = bits[1] if len(bits) > 1 else ""
+                if task_action in ("undone", "done") and task_type in ("copy", "upload"):
+                    undone, done = self._task_buckets(task_type)
+                    data = list(undone if task_action == "undone" else done)
+                    return self._send({"code": 200, "data": data})
             return self._send({"code": 404, "message": "unknown GET %s" % path})
 
         def do_PUT(self):
@@ -268,6 +372,9 @@ def make_ol_handler():
                 return self._send({"code": 401, "message": "unauthorized"}, 401)
 
             body = self._body()
+
+            if path.startswith("/api/task/"):
+                return self._serve_task(path, body)
 
             if path == "/api/fs/list":
                 p = body.get("path") or "/"
@@ -893,7 +1000,123 @@ def main():
               "in-left.bin" in [e["path"] for e in r.get("same") or []],
               repr(r.get("same"))[:200])
 
-        print("[22] 请求形状总检查")
+        print("[22] 传输列表：OpenList 任务单条动作 + 全部取消（v2.15.40）")
+        # 造两个未完成的 copy 任务（真实环境里由跨存储复制产生）
+        COPY_TASKS[:] = [
+            {"id": "cc1", "name": "c1.bin", "state": 1, "progress": 0,
+             "total_bytes": 111},
+            {"id": "cc2", "name": "c2.bin", "state": 0, "progress": 0,
+             "total_bytes": 222},
+        ]
+        st, d = call(base, "GET", "/api/openlist/tasks")
+        ids = sorted(t.get("openListId") for t in (d.get("tasks") or []))
+        check("传输列表能看到 OpenList 任务", ids == ["cc1", "cc2"], repr(ids)[:200])
+
+        # 单条取消：前端 OpenList 行上的「取消」按钮走的就是这个接口
+        st, d = call(base, "POST", "/api/openlist/task/cancel", {"id": "ol_cc2"})
+        check("单条取消 OpenList 任务成功", st == 200 and d.get("ok"), repr(d)[:200])
+        check("服务端的 undone 真的少了一个",
+              [t["id"] for t in COPY_TASKS] == ["cc1"], repr(COPY_TASKS)[:200])
+
+        COPY_TASKS.append({"id": "cc2", "name": "c2.bin", "state": 0,
+                           "progress": 0, "total_bytes": 222})
+        # 外部应用留下的 upload 任务：传输列表**看不到**它，所以「全部取消」也不该动它
+        UPLOAD_TASKS[:] = [{"id": "uu1", "name": "other.bin", "state": 1,
+                            "progress": 0, "total_bytes": 9}]
+        TASK_CALLS[:] = []
+        st, d = call(base, "POST", "/api/upload/cancel_all", {})
+        check("全部取消如实回报：提交 2 / 停下 2 / 残留 0",
+              d.get("openlistRequested") == 2 and d.get("openlistCancelled") == 2
+              and d.get("openlistRemaining") == 0, repr(d)[:300])
+        check("批量取消走的是 cancel_some",
+              "cancel_some:copy" in TASK_CALLS, repr(TASK_CALLS))
+        check("只报了 copy 一种类型（取消范围 = 列表可见类型）",
+              list((d.get("openlistTypes") or {}).keys()) == ["copy"],
+              repr(d.get("openlistTypes"))[:200])
+        check("看不见的 upload 任务一次都没被请求",
+              [c for c in TASK_CALLS if "upload" in c] == [], repr(TASK_CALLS))
+        check("别人的 upload 任务原封不动",
+              [t["id"] for t in UPLOAD_TASKS] == ["uu1"], repr(UPLOAD_TASKS))
+        st, d = call(base, "GET", "/api/openlist/tasks")
+        alive = [t for t in (d.get("tasks") or [])
+                 if t.get("status") in ("pending", "uploading")]
+        check("点了全部取消之后 /api/openlist/tasks 里那些任务真的消失了",
+              alive == [], repr(d)[:300])
+        check("假服务端的 undone 也空了（不是前端在自说自话）",
+              COPY_TASKS == [], repr(COPY_TASKS))
+        UPLOAD_TASKS[:] = []
+
+        print("[23] 全部取消：取消不掉的必须如实报残留（不谎报成功）")
+        COPY_TASKS[:] = [{"id": "stuck1", "name": "s.bin", "state": 1,
+                          "progress": 0, "total_bytes": 1}]
+        STUCK_TIDS.add("stuck1")
+        TASK_CALLS[:] = []
+        st, d = call(base, "POST", "/api/upload/cancel_all", {})
+        check("残留 1 个如实上报（不能按请求成功算成功）",
+              d.get("openlistRemaining") == 1 and d.get("openlistCancelled") == 0,
+              repr(d)[:300])
+        check("那个任务确实还在 undone 里",
+              [t["id"] for t in COPY_TASKS] == ["stuck1"], repr(COPY_TASKS))
+        check("失败的 tid 逐条兜底过（打过单条 cancel）",
+              "cancel:stuck1" in TASK_CALLS, repr(TASK_CALLS))
+        STUCK_TIDS.discard("stuck1")
+        COPY_TASKS[:] = []
+
+        print("[24] 全部重试：本地 0 失败也要把 OpenList 失败项重试掉")
+        DONE_TASKS[:] = [
+            {"id": "f1", "name": "f1.bin", "state": 7, "progress": 0,
+             "total_bytes": 1},
+            {"id": "ok1", "name": "ok1.bin", "state": 2, "progress": 100,
+             "total_bytes": 1},
+        ]
+        # 外部应用的 upload 失败任务：列表看不到 → 不该被顺手重试
+        UPLOAD_DONE[:] = [{"id": "uf1", "name": "other.bin", "state": 7,
+                           "progress": 0, "total_bytes": 1}]
+        TASK_CALLS[:] = []
+        st, d = call(base, "POST", "/api/upload/retry", {"all": True})
+        check("本地队列没有可重试的失败项", d.get("retried") == 0, repr(d)[:200])
+        check("OpenList 重试了 1 个失败项",
+              d.get("openlistRetried") == 1, repr(d)[:300])
+        check("只对 copy 调了 retry_failed（范围 = 列表可见类型）",
+              [c for c in TASK_CALLS if c.startswith("retry_failed")] ==
+              ["retry_failed:copy"], repr(TASK_CALLS))
+        check("看不见的类型一次都没被请求",
+              [c for c in TASK_CALLS if "upload" in c] == [], repr(TASK_CALLS))
+        check("别人的 upload 失败任务原封不动",
+              [t["id"] for t in UPLOAD_DONE] == ["uf1"], repr(UPLOAD_DONE))
+        check("失败任务被搬回执行队列（服务端真的重试了）",
+              [t["id"] for t in COPY_TASKS] == ["f1"], repr(COPY_TASKS))
+        DONE_TASKS[:] = []
+        COPY_TASKS[:] = []
+        UPLOAD_DONE[:] = []
+
+        print("[25] 本地传本地：传输列表里能看到记录（BUG-3）")
+        lc_src = os.path.join(DATA, "lc-src")
+        os.makedirs(os.path.join(lc_src, "inner"), exist_ok=True)
+        with open(os.path.join(lc_src, "a.txt"), "wb") as fh:
+            fh.write(b"A" * 7)
+        st, d = call(base, "POST", "/api/sync/copy",
+                     {"side": "local", "items": [lc_src],
+                      "target": os.path.join(DATA, "lc-dst")})
+        check("本地复制成功", st == 200 and d.get("copied") == 1, repr(d)[:200])
+        st, listing = call(base, "GET", "/api/upload/list")
+        recs = [t for t in (listing.get("tasks") or []) if t.get("isRecord")]
+        check("传输列表里出现本地复制记录",
+              len(recs) == 1 and recs[0].get("status") == "done", repr(recs)[:300])
+        check("记录带源/目标路径，且标成目录",
+              bool(recs) and recs[0].get("isDir") is True
+              and bool(recs[0].get("srcPath")) and recs[0].get("srcPath") != recs[0].get("dstPath"),
+              repr(recs[:1])[:300])
+        check("记录 id 用 lc_ 前缀（与队列任务/OpenList 任务区分开）",
+              bool(recs) and str(recs[0].get("id")).startswith("lc_"), repr(recs[:1])[:160])
+        st, d = call(base, "POST", "/api/upload/remove", {"id": recs[0]["id"]})
+        check("记录能按 id 删掉", st == 200 and d.get("record"), repr(d)[:200])
+        st, listing = call(base, "GET", "/api/upload/list")
+        check("删掉后列表里没有了",
+              [t for t in (listing.get("tasks") or []) if t.get("isRecord")] == [],
+              repr(listing)[:200])
+
+        print("[26] 请求形状总检查")
         check("全程没有出现形状不对的请求", BAD == [], "; ".join(BAD[:8]))
 
     finally:

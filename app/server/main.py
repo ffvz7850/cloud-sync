@@ -19,22 +19,55 @@ import http_api        # noqa: E402
 
 
 class Logger(object):
-    def __init__(self, path):
+    """按大小轮转的日志写入器。
+
+    早先是"每行 open/append/flush"，既不轮转也不设上限：NAS 上常驻几周，
+    info.log 会涨到几十上百 MB（扫描/上传重试都在写），而日志面板还要反复读它。
+    这里加 5 MB × 3 份的轮转，超限时把 .1→.2、.2→.3 后换新文件。
+    """
+
+    MAX_BYTES = 5 * 1024 * 1024
+    KEEP = 3
+
+    def __init__(self, path, max_bytes=None, keep=None):
         self.path = path
         self._lock = threading.Lock()
+        self.max_bytes = int(max_bytes or self.MAX_BYTES)
+        self.keep = max(1, int(keep or self.KEEP))
+
+    def _rotate(self):
+        for i in range(self.keep - 1, 0, -1):
+            src = "%s.%d" % (self.path, i)
+            dst = "%s.%d" % (self.path, i + 1)
+            if os.path.exists(src):
+                try:
+                    os.replace(src, dst)
+                except OSError:
+                    pass
+        try:
+            os.replace(self.path, self.path + ".1")
+        except OSError:
+            pass
 
     def __call__(self, message):
         stamp = time.strftime("%Y-%m-%d %H:%M:%S")
         line = "[%s] %s\n" % (stamp, message)
+        payload = line.encode("utf-8")
         with self._lock:
             try:
-                with open(self.path, "a", encoding="utf-8") as fh:
-                    fh.write(line)
+                if os.path.exists(self.path) and \
+                        os.path.getsize(self.path) + len(payload) > self.max_bytes:
+                    self._rotate()
+                with open(self.path, "ab") as fh:
+                    fh.write(payload)       # 直接写 UTF-8 字节，避免编码回落
                     fh.flush()
             except Exception:
                 pass
-        sys.stderr.write(line)
-        sys.stderr.flush()
+        try:
+            sys.stderr.write(line)
+            sys.stderr.flush()
+        except Exception:
+            pass
 
 
 def build_context():
@@ -84,6 +117,11 @@ def main(argv=None):
         if server:
             servers.append(server)
             log("统一网关 socket 已监听：%s" % socket_path)
+        elif getattr(ctx, "single_instance_conflict", False):
+            # 另一个实例已经在跑。此时**绝不能**继续起队列：两个进程会用同一份
+            # queue.json / bindings.json 互相覆盖。
+            log("已有实例在运行，本进程退出")
+            return 3
         else:
             log("当前平台不支持 Unix Socket，跳过网关监听")
 

@@ -421,5 +421,155 @@ class UploadTest(unittest.TestCase):
             os.unlink(local)
 
 
+class TaskManagementTest(unittest.TestCase):
+    """v2.15.40：任务管理（取消 / 删除 / 重试）必须**如实报告**结果。
+
+    为什么单独一整个用例类：真实 OpenList 的批量接口（`cancel_some` /
+    `delete_some`）**无论 tid 是否存在都返回 HTTP 200 + code 200**，每个 tid 的
+    结果放在 `data` 里。旧实现只要 HTTP 不抛异常就 `return len(tids)`，于是
+    「一个都没取消」也会被算成「已取消 N 个」并 toast 给用户 —— 那就是用户报的
+    「全部取消点了没反应」。
+    """
+
+    def _client(self, server):
+        client = support.make_openlist_client()
+        return client, support.PatchTransport(server)
+
+    def test_batch_returns_report_not_count(self):
+        """返回值必须是报告 dict（含 requested / ok / failed），不是裸计数。"""
+        server = support.FakeTaskServer(undone=[{"id": "t1"}, {"id": "t2"}])
+        client, patch = self._client(server)
+        with patch:
+            report = client.cancel_tasks(["t1", "t2"])
+        self.assertEqual(report["requested"], 2)
+        self.assertEqual(report["ok"], 2)
+        self.assertEqual(report["failed"], [])
+        self.assertEqual(server.ids(), [])
+
+    def test_batch_partial_failure_is_reported_and_retried_one_by_one(self):
+        """批量里混进一个不存在的 tid：成功的算成功，失败的必须如实报失败，
+        并且用**单条接口逐条兜底**（断言调用序列）。"""
+        server = support.FakeTaskServer(undone=[{"id": "t1"}, {"id": "t2"}])
+        client, patch = self._client(server)
+        with patch:
+            report = client.cancel_tasks(["t1", "t2", "ghost"])
+        self.assertEqual(report["requested"], 3)
+        self.assertEqual(report["ok"], 2, "只取消了 2 个，就不能报 3 个")
+        self.assertEqual([f["id"] for f in report["failed"]], ["ghost"])
+        self.assertIn("not found", report["failed"][0]["error"])
+        # 调用序列：先一次批量，再对**失败的那一个**逐条兜底
+        batch_calls = [c for c in server.calls if "cancel_some" in c[1]]
+        single_calls = [c for c in server.calls
+                        if c[1].startswith("cancel?") ]
+        self.assertEqual(len(batch_calls), 1, server.calls)
+        self.assertEqual(len(single_calls), 1,
+                         "失败的 tid 必须逐条兜底一次，其余的不该重复打：%s" % (server.calls,))
+        self.assertIn("tid=ghost", single_calls[0][1])
+
+    def test_batch_where_nothing_exists_never_claims_success(self):
+        """**反谎报**：批量接口全部返回 per-tid 错误时，成功数必须是 0。"""
+        server = support.FakeTaskServer(undone=[])
+        client, patch = self._client(server)
+        with patch:
+            report = client.cancel_tasks(["a", "b"])
+        self.assertEqual(report["ok"], 0, "一个都不存在，绝不能报成功")
+        self.assertEqual(sorted(f["id"] for f in report["failed"]), ["a", "b"])
+
+    def test_batch_without_per_tid_result_is_unknown_not_success(self):
+        """服务端不回逐条结果（data=null）时只能承认「不知道」。"""
+        server = support.FakeTaskServer(undone=[{"id": "t1"}], no_batch_data=True)
+        client, patch = self._client(server)
+        with patch:
+            report = client.cancel_tasks(["t1"])
+        self.assertEqual(report["ok"], 0)
+        self.assertEqual(report["unknown"], ["t1"])
+        self.assertEqual(report["failed"], [])
+
+    def test_batch_body_uses_tids_object(self):
+        """请求体必须是 BatchReq 形状 `{"tids": [...]}`（不是裸数组）。"""
+        server = support.FakeTaskServer(undone=[{"id": "t1"}])
+        client, patch = self._client(server)
+        with patch:
+            client.cancel_tasks(["t1"])
+        self.assertEqual(server.batch_bodies[0]["body"], ["t1"])
+
+    def test_upload_type_is_supported(self):
+        """`upload` 类型的任务同样能取消 —— 只打 copy 是旧实现的另一个缺陷。"""
+        server = support.FakeTaskServer(undone=[{"id": "u1"}])
+        server.add({"id": "u1"}, task_type="upload")
+        client, patch = self._client(server)
+        with patch:
+            report = client.cancel_tasks(["u1"], task_type="upload")
+        self.assertEqual(report["ok"], 1)
+        self.assertEqual(server.ids("upload"), [])
+
+    def test_single_action_paths(self):
+        """单条接口的 URL 形状：/api/task/<type>/<action>?tid=xxx。"""
+        server = support.FakeTaskServer(undone=[{"id": "t1"}])
+        client, patch = self._client(server)
+        urls = []
+        orig = client._request
+
+        def spy(method, api_path, **kw):
+            urls.append(api_path)
+            return orig(method, api_path, **kw)
+
+        with patch:
+            client._request = spy
+            self.assertTrue(client.cancel_task("t1"))
+            self.assertFalse(client.cancel_task("t1"), "第二次该失败（已不存在）")
+        self.assertEqual(urls, ["/api/task/copy/cancel", "/api/task/copy/cancel"])
+
+    def test_retry_failed_counts_by_difference(self):
+        """`retry_failed` 不返回条数 → 用调用前后 done 里失败数的差来核算。"""
+        server = support.FakeTaskServer()
+        server.add_done({"id": "f1", "state": 7})
+        server.add_done({"id": "f2", "state": 7})
+        server.add_done({"id": "ok1", "state": 2})
+        client, patch = self._client(server)
+        with patch:
+            result = client.retry_failed_tasks("copy")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["failedBefore"], 2)
+        self.assertEqual(result["failedAfter"], 0)
+        self.assertEqual(result["retried"], 2)
+        # 两个失败任务被搬回 undone（真的重试了），成功的那个留在 done
+        self.assertEqual(sorted(server.ids()), ["f1", "f2"])
+        self.assertEqual([t["id"] for t in server.done["copy"]], ["ok1"])
+
+    def test_retry_failed_reports_unknown_when_listing_fails(self):
+        """拿不到任务列表时 retried 必须是 None（不许编 0 之外的数字）。"""
+        client = support.make_openlist_client()
+
+        class NoList(object):
+            def __call__(self, method, url, headers=None, body=None, timeout=60):
+                if method == "GET" and "/api/task/" in url:
+                    return support.FakeTaskResp(
+                        500, {"code": 500, "message": "boom", "data": None})
+                return support.FakeTaskResp(
+                    200, {"code": 200, "message": "success", "data": None})
+
+        with support.PatchTransport(NoList()):
+            result = client.retry_failed_tasks("copy")
+        self.assertTrue(result["ok"], "调用本身是成功的")
+        self.assertIsNone(result["retried"], "数不出来就必须是 None，不能编数字")
+        self.assertIsNone(result["failedBefore"])
+
+    def test_parse_batch_errors(self):
+        self.assertEqual(openlist.parse_batch_errors({"a": None, "b": "x"}),
+                         {"b": "x"})
+        self.assertEqual(openlist.parse_batch_errors({"a": "", "b": None}), {})
+        self.assertIsNone(openlist.parse_batch_errors(None))
+        self.assertIsNone(openlist.parse_batch_errors([]))
+        self.assertIsNone(openlist.parse_batch_errors({}),
+                          "空字典等于「什么都没说」，不能当成全部成功")
+
+    def test_count_failed_tasks(self):
+        tasks = [{"state": 2}, {"state": 5}, {"state": 6}, {"state": 7},
+                 {"state": 4}, {}]
+        self.assertEqual(openlist.count_failed_tasks(tasks), 3,
+                         "5/6/7 才算失败；2 成功、4 取消、缺省当成功")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
