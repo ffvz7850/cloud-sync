@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>OpenList 上传</title>
 <style>
 :root{
@@ -244,6 +244,10 @@ table.cmp tr:hover td{background:#f7faff}
 /* 比对配置卡：01 来源 → 02 目标 步骤式；所有 id / data-cmp-* 属性保持原样 */
 #cmpBar{flex:none;min-height:var(--config-h);background:var(--fn-panel);border:1px solid var(--fn-line);border-radius:16px;box-shadow:var(--shadow-card);padding:12px 24px;margin:12px 12px 0;display:flex;flex-direction:column;justify-content:center;gap:6px}
 #cmpBar .cmpbar-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;min-width:0}
+/* 「来源/目标」一侧的分组容器：桌面上用 display:contents 完全透明，
+   子元素仍是 .cmpbar-row 的直接 flex 项，间距与换行行为和改动前一致；
+   只有手机断点里它才变成独立的一行（见文末移动端适配）。 */
+.cmp-side{display:contents}
 .cmp-step{display:inline-flex;align-items:center;gap:6px;flex:none}
 .cmp-step .lbl{font-size:12px;font-weight:600;color:var(--fn-text);white-space:nowrap}
 #btnCompare{background:var(--fn-amber);color:#fff;flex:none}
@@ -428,6 +432,311 @@ table.cmp tr:hover td{background:#f7faff}
 /* ---- 主色收口：绑定页历史 JS 内联色由纯 CSS 覆盖，跟随主题变量 ---- */
 #bindList .bf-tgt[style*="background:#eef5ff"]{background:var(--fn-blue-op-soft)!important}
 #bindList [style*="color:#409eff"]{color:var(--fn-blue)!important}
+
+/* ============================================================
+   移动端 / 飞牛 App 内嵌 WebView 适配（断点 720px）
+   ------------------------------------------------------------
+   桌面是「侧栏 220 + 双栏 + 中栏 118」的三段式；390px 宽的手机上
+   这么排，每栏只剩 130px，按钮和文件名全被裁掉。这里按四条规则重排：
+
+   1. 侧栏 → 底部标签栏（4 个 tab 均分，56px + safe-area 避让）；
+   2. 双栏 → 单栏切换：一次只显示「本地」或「云端」，拿到整屏高度；
+      上传/比对/下载收进底部 sticky 操作条，始终可点（无需滚到中栏）；
+   3. 行高与字号按触屏改：列表行 56px、字号 13.5px、勾选框 20px；
+      队列表 / 差异表 / 绑定表从 5 列网格改成 2 行网格，消除横向溢出；
+   4. 弹层 / 日志 / 二维码按视口收缩，所有贴底元素避让 safe-area。
+
+   全部是样式 + class 切换，**不动任何 id、文案与业务逻辑**。
+   ============================================================ */
+.m-pane-tabs{display:none}
+/* 手机端专属控件：桌面一律不显示，也不占位 */
+.mid-toggle{display:none}
+.cmp-tip-btn{display:none}
+
+/* WebView 里 100% 会随地址栏/工具栏伸缩算错，能认 dvh 就优先用它 */
+@supports (height:100dvh){html,body{height:100dvh}}
+
+/* 竖屏（窄）与横屏（矮）都算手机：横屏 844×390 时高度只剩 390，
+   三段式桌面上每栏只有 250px 高，同样得改单栏。 */
+@media (max-width:720px), (max-height:500px) and (max-width:1000px){
+  :root{--topbar-h:48px;--row-h:56px;--nav-h:56px}
+  html{-webkit-text-size-adjust:100%}
+  body{font-size:13px}
+
+  /* ---------- 骨架：单列 + 底部标签栏 ---------- */
+  #app{grid-template-columns:minmax(0,1fr);grid-template-rows:var(--topbar-h) minmax(0,1fr)}
+  /* 整页可上下滑：比对条会随滚动让位，文件列表因此能拿到接近整屏的高度。
+     原来 #main 是 overflow:hidden，只能靠列表内部滚，「上面的部分」永远推不上去。 */
+  #main{grid-column:1;grid-row:2;overflow-y:auto;overflow-x:hidden;
+    -webkit-overflow-scrolling:touch;overscroll-behavior-y:contain;
+    padding-bottom:calc(var(--nav-h) + env(safe-area-inset-bottom,0px) + 26px)}
+  /* 允许内容超出容器，滚动才真的生效（.page 默认 flex:1 + overflow:hidden 会把它锁死） */
+  #page-transfer{flex:none;overflow:visible;min-height:100%}
+
+  #sidebar{position:fixed;left:0;right:0;bottom:0;z-index:40;width:auto;
+    height:calc(var(--nav-h) + env(safe-area-inset-bottom,0px));
+    padding-bottom:env(safe-area-inset-bottom,0px);
+    flex-direction:row;align-items:stretch;background:rgba(255,255,255,.985);
+    border-top:1px solid var(--fn-line);border-right:none;
+    box-shadow:0 -2px 14px rgba(22,34,58,.07)}
+  /* display:contents 让 4 个 tab 直接成为同一行的 flex 子项，DOM 结构不用改 */
+  #sidebar .sb-nav,#sidebar .sb-footer{display:contents}
+  .sb-group-title{display:none}
+  #sidebar button[data-tab]{flex:1 1 0;width:auto;height:100%;min-width:0;
+    flex-direction:column;justify-content:center;gap:3px;padding:6px 2px 4px;
+    border-radius:0;font-size:10px;font-weight:500}
+  #sidebar button[data-tab] svg{width:22px;height:22px}
+  #sidebar button[data-tab]:hover{background:none}
+  #sidebar button[data-tab]:active{background:var(--fn-soft)}
+  #sidebar button[data-tab].active{background:none;color:var(--fn-blue)}
+  #sidebar button[data-tab].active::before{left:50%;top:0;bottom:auto;transform:translateX(-50%);
+    width:28px;height:3px;border-radius:0 0 3px 3px}
+
+  /* ---------- 顶栏：留 Logo + 名称 + 连接状态，其余让位 ---------- */
+  .topbar{padding:0 12px;gap:8px}
+  .topbar .aurora-logo{width:28px;height:28px;border-radius:8px}
+  .topbar .aurora-logo::after{inset:3px;border-radius:6px}
+  .topbar .aurora-logo svg{width:22px;height:22px;margin:3px}
+  .topbar .brand{font-size:14px}
+  .topbar .brand-en,.topbar .user-meta{display:none}
+  .topbar .pill{font-size:10px;padding:4px 9px}
+  .topbar .avatar-aurora{width:26px;height:26px;border-radius:8px}
+  .topbar .avatar-aurora::after{inset:3px;border-radius:6px}
+  .topbar .avatar-aurora svg{width:18px;height:18px;margin:4px}
+
+  /* ---------- 比对条：一行一侧，「比对」跟第二行同居，三行压成两行 ---------- */
+  #cmpBar{margin:6px 8px 0;padding:7px 10px;min-height:0;border-radius:12px;gap:0}
+  #cmpBar .cmpbar-row{gap:6px}
+  .cmpbar-row>.cmp-side:first-child{display:flex;flex:1 1 100%;align-items:center;gap:6px;
+    flex-wrap:nowrap;min-width:0}
+  /* flex-basis 必须是 0：用 auto 时它会按内容宽撑满，把「比对」挤到第三行（360 宽实测） */
+  .cmpbar-row>.cmp-side:nth-child(2){display:flex;flex:1 1 0;align-items:center;gap:6px;
+    flex-wrap:nowrap;min-width:0}
+  .cmp-step{min-width:26px}
+  .cmp-step .lbl{font-size:11px;white-space:nowrap}
+  .cb-src .cbs{padding:5px 8px;font-size:11px}
+  .cmpbar-row input[type=text]{flex:1 1 56px;min-width:0;height:34px;font-size:12.5px}
+  #btnCompare{flex:0 0 56px;width:56px;height:34px;padding:0;font-size:12.5px}
+  /* 说明文字默认收起（占高度且大多数时候不需要看），点下面那行「操作说明」才展开 */
+  #cmpHint{display:none;margin:6px 0 0;font-size:11px;line-height:1.6}
+  #cmpHint.show{display:block}
+  .cmp-tip-btn{display:flex;align-items:center;gap:5px;width:100%;margin-top:6px;
+    padding:1px 0;background:none;border:none;color:var(--fn-sub);font-size:11px;
+    text-align:left;min-height:0;cursor:pointer}
+  .cmp-tip-btn .ctb-ico{width:14px;height:14px;flex:none;border:1px solid currentColor;
+    border-radius:50%;font-size:9px;line-height:12px;text-align:center;font-style:normal}
+  .cmp-tip-btn .ctb-arrow{margin-left:auto;transition:transform .15s}
+  .cmp-tip-btn[aria-expanded="true"]{color:var(--fn-blue)}
+  .cmp-tip-btn[aria-expanded="true"] .ctb-arrow{transform:rotate(180deg)}
+
+  /* ---------- 单栏切换（压到 34 高，给列表让出 12px） ---------- */
+  .m-pane-tabs{display:flex;gap:4px;margin:6px 8px 0;padding:3px;
+    background:var(--fn-panel);border:1px solid var(--fn-line);border-radius:11px;flex:none}
+  .m-pane-tabs .mp-tab{flex:1 1 0;height:32px;border-radius:8px;background:none;
+    color:var(--fn-sub);font-size:12.5px;font-weight:600}
+  .m-pane-tabs .mp-tab.on{background:var(--fn-blue);color:#fff;box-shadow:var(--shadow-btn)}
+  .m-pane-tabs .mp-tab:not(.on):active{background:var(--fn-soft)}
+
+  /* 单栏铺满：以前是 absolute + bottom:92px（把操作条的高度预先扣掉），
+     矮屏上列表只剩两三行。这里改成正常流 + 最小高度，滚动交给外层 #main。 */
+  /* 高度必须是定值而不是 min-height：给了下限后 pane 会按内容一路撑高（500 个文件就是
+     两万多像素），列表内部滚动和它的分页（onscroll）都会失效。定高才能让 pane-body 继续滚。 */
+  #panes{display:flex;flex-direction:column;position:relative;overflow:hidden;
+    flex:none;height:calc(100vh - var(--topbar-h) - var(--nav-h) - 16px);
+    height:calc(100dvh - var(--topbar-h) - var(--nav-h) - 16px);
+    min-height:220px;padding:8px 8px 0}
+  #panes>.pane{position:static;flex:1 1 auto;min-height:0;margin:0}
+  #panes.mp-local>.pane:nth-child(3),
+  #panes.mp-cloud>.pane:first-child{display:none}
+
+  /* ---------- 中栏 → 右下角悬浮操作钮：没勾选时只有一颗小圆钮 ---------- */
+  #midbar{position:fixed;left:auto;right:12px;
+    bottom:calc(var(--nav-h) + env(safe-area-inset-bottom,0px) + 10px);
+    width:48px;height:48px;min-width:0;padding:0;border-radius:50%;
+    flex-direction:row;align-items:center;justify-content:center;gap:0;z-index:30;
+    background:var(--fn-panel);border:1px solid var(--fn-line);
+    box-shadow:0 6px 22px rgba(22,34,58,.18);
+    transition:width .18s ease,height .18s ease,border-radius .18s ease}
+  /* 收起的形态下三个按钮都不占位 */
+  #midbar .op{display:none}
+  .mid-toggle{display:flex;align-items:center;justify-content:center;position:relative;
+    width:100%;height:100%;padding:0;border:none;background:none;color:var(--fn-blue);border-radius:50%}
+  .mid-toggle:active{background:var(--fn-soft)}
+  .mid-toggle svg{width:22px;height:22px}
+  .mid-toggle .mt-num{position:absolute;top:-3px;right:-3px;min-width:18px;height:18px;
+    padding:0 4px;border-radius:999px;background:var(--fn-blue);color:#fff;
+    font-size:10px;font-weight:700;line-height:18px;text-align:center;display:none}
+  .mid-toggle .mt-num.on{display:block}
+  /* 勾选后自动展开（.has-sel）；展开态左侧那颗小钮可手动收起（.mid-min） */
+  #midbar.has-sel:not(.mid-min){left:12px;right:12px;width:auto;height:48px;padding:4px;
+    border-radius:14px;gap:5px;
+    background:rgba(255,255,255,.965);
+    -webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px)}
+  #midbar.has-sel:not(.mid-min) .op{display:flex;flex:1 1 0;width:auto;height:40px;
+    border-radius:10px;flex-direction:row;gap:5px;box-shadow:none;padding:0 6px}
+  #midbar.has-sel:not(.mid-min) .op .op-ico{width:17px;height:17px}
+  #midbar.has-sel:not(.mid-min) .op .op-txt{font-size:12px}
+  #midbar.has-sel:not(.mid-min) #btnUpload{flex:1.35 1 0}
+  /* 手机端按钮文案本身已带 "→"，再叠一个 ↑ 会变成「↑ 上传 →」，去掉图标 */
+  #midbar.has-sel:not(.mid-min) .op.upload::before{content:none}
+  /* 展开态把手缩成小方块，箭头翻转表示「收起」 */
+  /* 展开态：左侧把手是「收起」，已选数量作为小徽标钉在它右上角 */
+  #midbar.has-sel:not(.mid-min) .mid-toggle{width:34px;height:34px;flex:none;
+    background:var(--fn-soft);border-radius:9px;overflow:visible}
+  #midbar.has-sel:not(.mid-min) .mid-toggle svg{width:15px;height:15px;transform:rotate(180deg)}
+  #midbar.has-sel:not(.mid-min) .mt-num{top:-5px;right:-6px;min-width:16px;height:16px;
+    font-size:9px;line-height:16px;padding:0 3px}
+  /* 手机端不再用条子上沿那行文字（会压住列表），数量改由把手角标承担 */
+  #midbar #selInfo{display:none}
+
+  /* 悬浮操作条压在列表上，滚动区底部留出等高空档 —— 滚到底时最后一项不会被盖住 */
+  .pane-body{padding-bottom:62px}
+  /* ---------- 文件列表：行高 / 字号 / 勾选框按触屏 ---------- */
+  .flist-row{height:var(--row-h);padding:0 10px;gap:8px;font-size:13.5px;border-radius:8px}
+  .flist-row .fn{font-size:13.5px}
+  .flist-row .fs{width:50px;font-size:11px}
+  .flist-row .fi,.flist-row .icon-tile{width:32px;height:32px;font-size:16px;border-radius:9px}
+  /* 勾选框放大到 22px：手机上「勾选文件夹去上传/比对」和「点名字进目录」是两件事，
+     勾选框够大才不会误触进目录 */
+  .flist-row input[type=checkbox],.drow input[type=checkbox],.bfrow input[type=checkbox]{
+    width:22px;height:22px;flex:none;accent-color:var(--fn-blue)}
+  .pane-head{padding:8px 10px}
+  .pane-head .ph-title{font-size:13px;margin-bottom:4px}
+  .pane-head .linkbtn{min-height:32px;padding:4px 8px}
+  .crumb{font-size:12px;min-height:24px}
+  /* 面包屑为空时不占位：手机上垂直空间紧张，空 crumb 白占 24px */
+  .crumb:empty{display:none}
+
+  /* ---------- 传输列表：5 列 → 两行网格 ---------- */
+  #queuePane{margin:8px}
+  #queuePane .q-head{padding:8px;gap:6px}
+  /* 头部重排：标题+统计一行、筛选独占一行、四个操作排最后 —— 避免「全部取消」被挤到第三行半截 */
+  #queuePane .q-head>span[style]{display:none}
+  #queuePane .q-head #queueStat{flex:1 1 auto;min-width:0}
+  #queuePane .q-head .qfilter{flex:1 1 100%;order:2;flex-wrap:wrap}
+  #queuePane .q-head .linkbtn{order:3}
+  #queuePane .q-head .t{font-size:14px}
+  .qfilter .fbtn{min-height:32px;padding:6px 11px}
+  #queuePane .q-head .linkbtn{min-height:32px;padding:4px 8px}
+  .qrow{grid-template-columns:22px minmax(0,1fr) auto;gap:2px 8px;padding:10px;font-size:12.5px}
+  .qrow>:nth-child(1){grid-row:1/span 2;align-self:center}
+  .qrow>:nth-child(2){grid-column:2;grid-row:1;min-width:0}
+  .qrow>:nth-child(3){grid-column:2;grid-row:2;font-size:11px;text-align:left}
+  .qrow>:nth-child(4){grid-column:3;grid-row:2;justify-self:end}
+  .qrow>:nth-child(5){grid-column:3;grid-row:1;justify-self:end;align-self:center}
+  .qops{gap:2px}
+  .qops .linkbtn{min-height:30px;padding:4px 8px}
+
+  /* ---------- 差异结果：整屏覆盖，收起的头部停在标签栏上方 ---------- */
+  #diffPane{position:fixed;left:0;right:0;top:0;
+    bottom:calc(var(--nav-h) + env(safe-area-inset-bottom,0px));z-index:45}
+  #diffHead{padding:8px 10px}
+  .diff-head-row{gap:6px}
+  .dstat{padding:4px 8px;font-size:11px}
+  .dstat b{font-size:13px}
+  .drow{grid-template-columns:22px minmax(0,1fr) auto;gap:2px 8px;padding:9px 10px;font-size:12.5px}
+  .drow>:nth-child(1){grid-row:1/span 3;align-self:center}
+  .drow>:nth-child(2){grid-column:2;grid-row:1;min-width:0}
+  .drow>:nth-child(3){grid-column:2;grid-row:2;text-align:left;font-size:11px}
+  .drow>:nth-child(4){grid-column:2;grid-row:3;text-align:left;font-size:11px}
+  .drow>:nth-child(4):empty{display:none}
+  .drow>:nth-child(5){grid-column:3;grid-row:1/span 3;align-self:center}
+  .diff-pager{flex-wrap:wrap;gap:8px;padding:10px}
+  .dgrp-head{padding:8px 10px;flex-wrap:wrap;gap:6px}
+
+  /* ---------- 同步备份 ---------- */
+  #bindToolbar{padding:8px;gap:8px;flex-wrap:wrap}
+  #bindToolbar .btn{flex:1 1 0;min-height:40px}
+  #bindList{padding:8px}
+  .bcard-head{padding:12px;gap:8px}
+  .bcard-head .bc-ops{width:100%;justify-content:flex-end;flex-wrap:wrap}
+  .bcard-head .bc-ops .linkbtn{min-height:32px;padding:4px 8px}
+  .bc-files-bar{padding:8px 10px;gap:8px}
+  .bc-files{max-height:50dvh}
+  .bfrow{grid-template-columns:24px minmax(0,1fr);gap:2px 8px;padding:9px 10px}
+  .bfrow>:nth-child(1){grid-row:1/span 3;align-self:start;margin-top:3px}
+  .bfrow>:nth-child(2){grid-column:2;grid-row:1;min-width:0}
+  .bfrow>:nth-child(3){grid-column:2;grid-row:2;text-align:left;font-size:11px}
+  .bfrow>:nth-child(4){grid-column:2;grid-row:3;justify-content:flex-start}
+
+  /* ---------- 设置 / 连接 / 表单：label 上、控件下 ---------- */
+  .settings-card{margin:8px;padding:16px 14px}
+  .section-t{margin:4px 0 10px}
+  .card{margin:8px;padding:14px}
+  #page-connect .card{margin:12px!important;max-width:none!important}
+  .frow{flex-wrap:wrap;gap:6px;margin-bottom:12px;min-height:0}
+  .frow label{width:100%;font-size:12.5px}
+  .frow input[type=text],.frow input[type=password],.frow input[type=number],.frow input[type=time]{
+    flex:1 1 100%;min-height:44px;font-size:14px}
+  .frow.actions .btn{flex:1 1 100%;min-height:46px}
+  .path-group{padding:10px 10px 2px}
+  .path-group .frow label{width:100%}
+  #logBox{max-height:46dvh;font-size:11px}
+  .sponsor-qr img{width:84px;height:84px}
+
+  /* ---------- 弹层 ---------- */
+  #dialog{min-width:0;width:calc(100vw - 28px);max-width:520px}
+  #dialog .dh{padding:14px 16px 0;font-size:15px}
+  #dialog .db{padding:12px 16px}
+  #dialog .df{padding:0 16px 14px;gap:8px}
+  #dialog .df .btn{min-height:44px}
+  #bindDlg,#pickerDlg{width:calc(100vw - 20px);max-width:600px;max-height:88dvh}
+  #bindDlg .bd-body{padding:14px}
+  #pickerDlg .pk-footer{flex-wrap:wrap;gap:8px}
+  .pkrow{min-height:44px}
+
+  /* ---------- 全局小件 ---------- */
+  .btn{min-height:40px}
+  .linkbtn{min-height:32px}
+  #toast{bottom:calc(var(--nav-h) + env(safe-area-inset-bottom,0px) + 14px);
+    max-width:calc(100vw - 32px);text-align:center;font-size:12.5px}
+  table.cmp{font-size:12px}
+}
+
+/* 横屏手机（高度 <520）：宽度够，但高度只剩 390 左右，
+   上面那套「比对条三行 + 48px 标签」会把列表挤成一条缝。这里把
+   比对条压回一行、标签栏与操作条一起收窄，把高度还给列表。 */
+@media (max-height:520px) and (max-width:1000px){
+  :root{--topbar-h:44px;--nav-h:48px}
+  /* 横屏高度本来够用：收回竖屏那套「整页滚动 + 悬浮条留白」，
+     回到「一屏固定、列表内部滚」—— 不这么做 panes 会按内容撑高，把操作条顶出屏幕。 */
+  #main{overflow:hidden;padding-bottom:calc(var(--nav-h) + env(safe-area-inset-bottom,0px))}
+  #page-transfer{flex:1;overflow:hidden;min-height:0}
+  #sidebar button[data-tab]{font-size:9px;padding:3px 0 2px;gap:2px}
+  #sidebar button[data-tab] svg{width:19px;height:19px}
+  .topbar .aurora-logo{width:24px;height:24px}
+  #cmpBar{margin:6px 8px 0;padding:6px 10px;border-radius:10px}
+  #cmpBar .cmpbar-row{flex-wrap:nowrap}
+  /* 覆盖竖屏那套「一行一侧」：这里宽度够，维持原单行 */
+  #cmpBar .cmpbar-row>.cmp-side{flex:0 1 auto;flex-wrap:nowrap}
+  .cmpbar-row input[type=text]{flex:1 1 90px;height:34px}
+  #btnCompare{flex:0 0 auto;width:auto;height:34px;padding:0 18px}
+  #cmpHint{display:none}
+  .cmp-tip-btn{display:none}
+  /* 横屏宽度够：不切单栏，直接左右两栏并排（回到用户熟悉的心智模型），
+     操作条改为跨两栏的底部一条；标签栏在这里没有意义，隐藏。 */
+  .m-pane-tabs{display:none}
+  #panes{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);
+    grid-template-rows:minmax(0,1fr) 46px;gap:6px;padding:6px;overflow:hidden;
+    flex:1 1 auto;height:auto;min-height:0}
+  #panes>.pane{position:static;margin:0;min-height:0;flex:none}
+  #panes>.pane:first-child{grid-column:1;grid-row:1}
+  #panes>.pane:nth-child(3){grid-column:2;grid-row:1}
+  #panes.mp-local>.pane:nth-child(3),
+  #panes.mp-cloud>.pane:first-child{display:flex}
+  #midbar{position:static;grid-column:1/-1;grid-row:2;left:auto;right:auto;bottom:auto;
+    width:auto;height:46px;padding:0;border-radius:0;border:none;background:none;
+    box-shadow:none;gap:8px}
+  #midbar .op{display:flex;height:46px;border-radius:12px}
+  #midbar.has-sel:not(.mid-min){left:auto;right:auto;width:auto;height:46px;padding:0;
+    border-radius:0;gap:8px}
+  #midbar.has-sel:not(.mid-min) .op{height:46px;border-radius:12px}
+  #midbar.has-sel:not(.mid-min) .op .op-ico{width:20px;height:20px}
+  #midbar .mid-toggle{display:none}
+  #midbar #selInfo{top:-26px;padding:2px 10px;font-size:10px}
+  .flist-row{height:48px}
+}
+
 </style>
 </head>
 <body>
@@ -496,21 +805,36 @@ table.cmp tr:hover td{background:#f7faff}
   <div class="page" id="page-transfer">
     <div id="cmpBar">
       <div class="cmpbar-row">
-        <span class="cmp-step"><span class="lbl">来源</span></span>
-        <span class="cb-src" id="cmpSrcLeft">
-          <button type="button" class="cbs on" data-cmp-which="left" data-cmp-side="local">本地</button>
-          <button type="button" class="cbs" data-cmp-which="left" data-cmp-side="cloud">云端</button>
-        </span>
-        <input type="text" id="cmpLocal" placeholder="本地目录，如 /vol1/1000/相册">
-        <span class="cmp-step target"><span class="lbl">目标</span></span>
-        <span class="cb-src" id="cmpSrcRight">
-          <button type="button" class="cbs" data-cmp-which="right" data-cmp-side="local">本地</button>
-          <button type="button" class="cbs on" data-cmp-which="right" data-cmp-side="cloud">云端</button>
-        </span>
-        <input type="text" id="cmpCloud" placeholder="/backup/相册">
+        <!-- 手机上按「一侧一组」换行（label + 切换 + 路径 必须同组），桌面靠 display:contents 保持原样 -->
+        <div class="cmp-side">
+          <span class="cmp-step"><span class="lbl">来源</span></span>
+          <span class="cb-src" id="cmpSrcLeft">
+            <button type="button" class="cbs on" data-cmp-which="left" data-cmp-side="local">本地</button>
+            <button type="button" class="cbs" data-cmp-which="left" data-cmp-side="cloud">云端</button>
+          </span>
+          <input type="text" id="cmpLocal" placeholder="本地目录，如 /vol1/1000/相册">
+        </div>
+        <div class="cmp-side">
+          <span class="cmp-step target"><span class="lbl">目标</span></span>
+          <span class="cb-src" id="cmpSrcRight">
+            <button type="button" class="cbs" data-cmp-which="right" data-cmp-side="local">本地</button>
+            <button type="button" class="cbs on" data-cmp-which="right" data-cmp-side="cloud">云端</button>
+          </span>
+          <input type="text" id="cmpCloud" placeholder="/backup/相册">
+        </div>
         <button class="btn" id="btnCompare" title="双向比对：两侧各自可以是本地或云端，自动递归到最底层">比对</button>
       </div>
       <div id="cmpHint"></div>
+      <!-- 手机端专用：说明文字默认收起（省出列表高度），点这一行才展开。
+           桌面端整行隐藏，说明照常常显，行为不变。 -->
+      <button type="button" class="cmp-tip-btn" id="cmpTipBtn" aria-expanded="false">
+        <span class="ctb-ico" aria-hidden="true">i</span><span class="ctb-txt">操作说明</span><span class="ctb-arrow" aria-hidden="true">▾</span>
+      </button>
+    </div>
+    <!-- 手机端专用：一屏只显示一栏，靠这排切换（桌面端整排隐藏，双栏行为不变） -->
+    <div id="mPaneTabs" class="m-pane-tabs">
+      <button type="button" class="mp-tab on" data-mpane="local">本地</button>
+      <button type="button" class="mp-tab" data-mpane="cloud">云端</button>
     </div>
     <div id="panes">
       <div class="pane">
@@ -523,6 +847,12 @@ table.cmp tr:hover td{background:#f7faff}
         <div class="pane-body" id="localList"><div class="loading">加载中…</div></div>
       </div>
       <div id="midbar">
+        <!-- 手机端专用把手：没勾选时操作条收成这颗小圆钮（点它展开），勾选后整条自动弹出。
+             桌面端 `.mid-toggle` 恒为 display:none，不影响原三键布局。 -->
+        <button class="mid-toggle" type="button" id="midToggle" aria-label="展开上传/比对/下载" aria-expanded="false">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M12 5l-6 6M12 5l6 6"/><path d="M4 21h16"/></svg>
+          <span class="mt-num" id="midCount"></span>
+        </button>
         <button class="btn ghost op upload" id="btnUpload" title="把左侧勾选的内容上传到右侧当前目录">上传 →</button>
         <button class="btn op compare" id="btnComparePick" title="用左右两栏各勾选的文件夹（或当前所在目录）做双向比对"><span class="op-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 5H5v14h3M16 5h3v14h-3"/><path d="M12 7v10M12 7l-2 2M12 7l2 2M12 17l-2-2M12 17l2-2"/></svg></span><span class="op-txt">比对</span></button>
         <button class="op download" type="button" title="下载请在比对结果的差异面板中操作"><span class="op-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M12 19l-6-6M12 19l6-6"/></svg></span><span class="op-txt">下载</span></button>
@@ -997,6 +1327,16 @@ function appendLocalRows(box,pg){
 function updateSelInfo(){
   const l=state.local.sel.size||0,c=(state.cloud.sel&&state.cloud.sel.size)||0;
   const el=$("selInfo");if(!el)return;
+  // 手机端：有勾选就把操作条展开（.has-sel 由 CSS 负责形态），没勾选收回小圆钮。
+  // 桌面端 #midbar 没有 .mid-toggle，这套 class 不影响它原来的三键布局。
+  const bar=document.getElementById("midbar");
+  if(bar){
+    bar.classList.toggle("has-sel",!!(l||c));
+    // 勾选被清空后把手动收起的标记复位，下次再勾选才会重新自动弹出
+    if(!l&&!c)bar.classList.remove("mid-min");
+    const num=document.getElementById("midCount");
+    if(num){num.textContent=String(l+c);num.classList.toggle("on",!!(l||c));}
+  }
   if(!l&&!c){el.innerHTML="未选择";return;}
   // 只选了本地时保持老文案：上传按钮的语义就是"把左侧勾选传上去"
   if(l&&!c){el.innerHTML=`已选 ${l} 项`;return;}
@@ -1681,6 +2021,15 @@ function renderCmpHint(){
   }
   el.dataset.mode="loose";
   el.classList.add("warn");
+  // 这句是在说「你现在这么比，比不出差异」—— 手机上说明默认折叠，警告必须自己弹出来，
+  // 折着等于没说。正常态不动它，保留用户手动展开/收起的选择。
+  el.classList.add("show");
+  const tb=document.getElementById("cmpTipBtn");
+  if(tb){
+    tb.setAttribute("aria-expanded","true");
+    const tx=tb.querySelector(".ctb-txt");
+    if(tx)tx.textContent="收起说明";
+  }
   el.innerHTML=who+"的来源是 <strong>"+name+"</strong>，但"+why+"。"+
     "两侧指向同一个位置是比不出差异的。";
 }
@@ -3381,6 +3730,74 @@ async function bootstrap(){
   await loadConfig();
   if(state.connection&&state.connection.online){bootstrap();}
   else{showConnect();}
+})();
+</script>
+<script>
+/* ================= 移动端专项行为（不触碰任何业务逻辑） =================
+   两件事：
+   1) 单栏切换：给 #panes 加 mp-local / mp-cloud 一个 class，纯样式接管；
+      桌面端这排 tab 是 display:none，加了 class 也没有任何视觉影响。
+   2) 手指进目录：原逻辑是「单击=勾选、双击=进目录」，触屏没有双击，
+      手机上等于进不去文件夹。这里在捕获阶段拦下「点在目录名上」的单击，
+      直接派发一次 dblclick 复用原有处理函数 —— 不改 loadLocal/loadCloud 一行代码。
+      桌面（精确指针）完全不注册这个监听。 */
+(function(){
+  /* ---- 手机端两处折叠：比对条说明 / 底部操作条 ----
+     这两个控件的基样式都是 display:none，桌面端点不到，所以不需要按指针类型分流。 */
+  var tipBtn=document.getElementById("cmpTipBtn"),hint=document.getElementById("cmpHint");
+  if(tipBtn&&hint){
+    tipBtn.addEventListener("click",function(){
+      var open=hint.classList.toggle("show");
+      tipBtn.setAttribute("aria-expanded",open?"true":"false");
+      var txt=tipBtn.querySelector(".ctb-txt");
+      if(txt)txt.textContent=open?"收起说明":"操作说明";
+    });
+  }
+  var midToggle=document.getElementById("midToggle");
+  if(midToggle){
+    midToggle.addEventListener("click",function(ev){
+      ev.stopPropagation();
+      var bar=document.getElementById("midbar");
+      if(!bar)return;
+      if(bar.classList.contains("has-sel")){
+        // 有勾选：小钮是「收起」，展开态里那颗小方块是「再收起一次」的反向
+        var collapsed=bar.classList.toggle("mid-min");
+        midToggle.setAttribute("aria-expanded",collapsed?"false":"true");
+      }else{
+        // 没勾选时三个按钮点了也没内容可传，直接告诉用户先勾选
+        if(typeof toast==="function")toast("先在列表里勾选文件或文件夹");
+      }
+    });
+  }
+
+  var tabs=document.getElementById("mPaneTabs"),panes=document.getElementById("panes");
+  if(tabs&&panes){
+    panes.classList.add("mp-local");
+    tabs.addEventListener("click",function(ev){
+      var b=ev.target&&ev.target.closest?ev.target.closest(".mp-tab"):null;
+      if(!b)return;
+      var which=b.getAttribute("data-mpane")==="cloud"?"mp-cloud":"mp-local";
+      panes.classList.remove("mp-local","mp-cloud");
+      panes.classList.add(which);
+      var all=tabs.querySelectorAll(".mp-tab");
+      for(var i=0;i<all.length;i++)all[i].classList.toggle("on",all[i]===b);
+    });
+  }
+
+  var coarse=false;
+  try{coarse=!!(window.matchMedia&&window.matchMedia("(pointer:coarse)").matches);}catch(e){}
+  if(!coarse)return;
+  document.addEventListener("click",function(ev){
+    var t=ev.target;
+    if(!t||!t.closest)return;
+    var nm=t.closest(".flist-row.dir .fn");
+    if(!nm)return;
+    var row=nm.closest(".flist-row");
+    if(!row)return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    row.dispatchEvent(new MouseEvent("dblclick",{bubbles:true,cancelable:true}));
+  },true);
 })();
 </script>
 </body>

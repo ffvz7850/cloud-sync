@@ -36,6 +36,38 @@ def read_bytes(rel):
         return fh.read()
 
 
+def strip_media_blocks(css):
+    """剥掉 @media{...} 整块，只留**基础层（桌面）**规则。
+
+    为什么要剥：下面那些「上传按钮不能被挤没」「#panes 必须是三轨网格」
+    「.frow 必须 nowrap」的断言，约束的是桌面基础层。移动端断点里合法地要改成
+    单栏、两行、换行，不剥的话 `re.findall(r"([^{}]+)\{([^{}]*)\}")` 会把
+    @media 里的覆盖当成基础层的最后一条，_rule() 取到的是移动端的值 → 假红。
+    断点自身的行为由 MobileAdaptationTest 单独钉住，不是不管。
+    """
+    out, i = [], 0
+    while True:
+        j = css.find("@media", i)
+        if j < 0:
+            out.append(css[i:])
+            return "".join(out)
+        out.append(css[i:j])
+        k = css.find("{", j)
+        if k < 0:
+            return "".join(out)
+        depth, p = 0, k
+        while p < len(css):
+            if css[p] == "{":
+                depth += 1
+            elif css[p] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            p += 1
+        i = p + 1
+
+
+
 def strip_js_comments(text):
     """剥掉 JS 注释再检查：注释里正当地提到 confirm() 这类名字不该被判违规。"""
     text = re.sub(r"/\*.*?\*/", " ", text, flags=re.DOTALL)
@@ -112,6 +144,8 @@ class UploadButtonLayoutContractTest(unittest.TestCase):
         css = match.group(1) if match else ""
         # 先剥掉 CSS 注释：注释会粘在选择器捕获里，导致精确匹配失效
         css = re.sub(r"/\*.*?\*/", " ", css, flags=re.DOTALL)
+        # 只校验基础层：@media 里是移动端断点，覆盖值不算违约（见 strip_media_blocks）
+        css = strip_media_blocks(css)
         cls.css = css
         cls.rules = re.findall(r"([^{}]+)\{([^{}]*)\}", css)
 
@@ -436,6 +470,7 @@ class LayoutV21ContractTest(unittest.TestCase):
         match = re.search(r"<style>(.*?)</style>", cls.html, re.DOTALL)
         css = match.group(1) if match else ""
         css = re.sub(r"/\*.*?\*/", " ", css, flags=re.DOTALL)
+        css = strip_media_blocks(css)   # 只看桌面基础层
         cls.rules = dict((sel.strip(), body) for sel, body in
                          re.findall(r"([^{}]+)\{([^{}]*)\}", css))
 
@@ -524,6 +559,7 @@ class SettingsLayoutV21ContractTest(unittest.TestCase):
         cls.html = read("app/www/index.html")
         match = re.search(r"<style>(.*?)</style>", cls.html, re.DOTALL)
         css = re.sub(r"/\*.*?\*/", " ", match.group(1) if match else "", flags=re.DOTALL)
+        css = strip_media_blocks(css)   # 只看桌面基础层
         cls.rules = dict((sel.strip(), body) for sel, body in
                          re.findall(r"([^{}]+)\{([^{}]*)\}", css))
 
@@ -680,6 +716,124 @@ class BindingContractTest(unittest.TestCase):
         """手动上传（upload_files）与自动上传（_auto_upload）都要存在。"""
         self.assertIn("def upload_files", read("app/server/bindings.py"))
         self.assertIn("def _auto_upload", read("app/server/bindings.py"))
+
+
+class MobileAdaptationTest(unittest.TestCase):
+    """移动端适配契约（3.1）。
+
+    背景：飞牛 App 打开的是同一个页面，手机上原本是「侧栏 220 + 双栏 130/130」，
+    按钮和文件名全被裁掉。这组断言钉住四件事，防止以后改样式时又把手机端改坏：
+
+    1. 断点存在，且**只**在断点里覆盖（基础层必须还是桌面布局）；
+    2. 手机上侧栏变成底部标签栏，不是被删掉 —— 四个 tab 一个都不能少；
+    3. 上传按钮与中栏操作条在**任何一层**都不许被隐藏（这是 2.0.1 的老事故）；
+    4. viewport / safe-area / dvh 三件套在位，否则在飞牛 WebView 里会被工具栏啃掉一截。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.html = read("app/www/index.html")
+        match = re.search(r"<style>(.*?)</style>", cls.html, re.DOTALL)
+        css = re.sub(r"/\*.*?\*/", " ", match.group(1) if match else "", flags=re.DOTALL)
+        cls.css_all = css
+        cls.css_base = strip_media_blocks(css)
+        cls.media_css = cls._media_only(css)
+        cls.media_tight = re.sub(r"\s+", "", cls.media_css)
+        cls.base_tight = re.sub(r"\s+", "", cls.css_base)
+
+    @staticmethod
+    def _media_only(css):
+        """取出所有 @media 块的内部文本（strip_media_blocks 的镜像）。"""
+        out, i = [], 0
+        while True:
+            j = css.find("@media", i)
+            if j < 0:
+                return " ".join(out)
+            k = css.find("{", j)
+            if k < 0:
+                return " ".join(out)
+            depth, p = 0, k
+            while p < len(css):
+                if css[p] == "{":
+                    depth += 1
+                elif css[p] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                p += 1
+            out.append(css[k:p])
+            i = p + 1
+
+    def test_breakpoint_declared(self):
+        self.assertIn("@media (max-width:720px)", self.html,
+                      "缺少手机竖屏断点")
+        # 横屏（矮）也必须走移动布局，否则 844×390 只剩一条缝
+        self.assertIn("max-height:520px", self.html,
+                      "缺少横屏手机的矮屏断点")
+
+    def test_base_layer_stays_desktop(self):
+        """基础层不能被移动端规则污染：三轨网格 + 220 侧栏必须原样。"""
+        self.assertIn("grid-template-columns:var(--sidebar-w)minmax(0,1fr)",
+                      self.base_tight,
+                      "桌面基础层的 #app 栅格被改动了")
+        self.assertIn("--sidebar-w:220px", self.base_tight,
+                      "桌面侧栏宽度令牌被改动了")
+
+    def test_bottom_nav_reuses_sidebar_tabs(self):
+        """手机上侧栏要变成固定底部栏，且四个 tab 仍在 DOM 里（不能被 display:none 掉）。"""
+        self.assertIn("#sidebar{position:fixed", self.media_tight,
+                      "手机上侧栏没有变成固定底部栏")
+        for tab in ("transfer", "bindings", "queue", "settings"):
+            self.assertIn('data-tab="%s"' % tab, self.html,
+                          "底部标签栏少了 %s" % tab)
+
+    def test_upload_button_never_hidden_any_layer(self):
+        """上传按钮本身（#btnUpload）任何一层都不许 display:none / visibility:hidden。
+        操作条整体在 3.2.0 起允许收起成把手，但那是另一条契约（见下一个用例）。"""
+        for layer in (self.css_base, self.media_css):
+            for selector, body in re.findall(r"([^{}]+)\{([^{}]*)\}", layer):
+                norm = body.replace(" ", "").lower()
+                if "display:none" not in norm and "visibility:hidden" not in norm:
+                    continue
+                for sel in selector.split(","):
+                    if "#btnupload" in sel.strip().lower():
+                        self.fail("规则 %s 会隐藏上传按钮" % sel)
+
+    def test_collapsed_action_bar_keeps_handle(self):
+        """手机端操作条可以收起成一颗把手（三个 .op 隐藏），但必须：
+        (a) 把手在 DOM 里且手机上真的显示；(b) 点它能展开。
+        这条是「上传入口不能凭空消失」那个老 bug 的新形态守卫。"""
+        self.assertIn("#midbar .op{display:none}", self.css_all.replace("\n", ""),
+                      "收起态没有把三个操作按钮藏起来")
+        self.assertIn('id="midToggle"', self.html,
+                      "收起态缺少展开把手 —— 上传入口会彻底消失")
+        self.assertIn(".mid-toggle{display:flex", self.css_all,
+                      "把手在手机端没有被显示出来")
+        self.assertIn('getElementById("midToggle")', self.html,
+                      "把手没有绑定点击逻辑，点了也展不开")
+
+    def test_viewport_fit_and_safe_area(self):
+        self.assertIn('viewport-fit=cover', self.html,
+                      "viewport 没开 viewport-fit=cover，刘海屏/底部横条会压住界面")
+        self.assertIn("env(safe-area-inset-bottom", self.html,
+                      "底部标签栏没有避让 safe-area")
+        self.assertIn("@supports (height:100dvh)", self.html,
+                      "没有 dvh 兜底：飞牛 WebView 里 100% 会随工具栏伸缩算错")
+
+    def test_pane_switch_control_default_hidden(self):
+        """.m-pane-tabs 桌面必须隐藏（否则桌面多出一条 Tab），手机上才显示。"""
+        self.assertIn(".m-pane-tabs{display:none}", self.base_tight,
+                      "桌面没有隐藏单栏切换条")
+        self.assertIn("mPaneTabs", self.html, "缺少单栏切换的容器 id")
+
+    def test_mobile_tables_are_rewrapped(self):
+        """队列表/差异表/绑定表原本是 5 列网格，手机上必须重排成两行，否则横向溢出。"""
+        self.assertIn(".qrow{grid-template-columns:22pxminmax(0,1fr)auto",
+                      self.media_tight, "队列表没有重排")
+        self.assertIn(".drow{grid-template-columns:22pxminmax(0,1fr)auto",
+                      self.media_tight, "差异表没有重排")
+        self.assertIn(".bfrow{grid-template-columns:24pxminmax(0,1fr)",
+                      self.media_tight, "绑定文件表没有重排")
 
 
 if __name__ == "__main__":
